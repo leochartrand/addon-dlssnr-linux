@@ -170,6 +170,11 @@ struct State {
   // look everywhere, and the Small FP8 network fries at its size while Legacy (1) holds up, so it
   // defaults to Legacy; the full-res crop runs `preset`.
   int split_global_preset = 1;
+  // ...and its own tuning: the periphery pass is a separate feature, so it can have its own hand.
+  float split_global_intensity = 1.0f;
+  float split_global_structure = 1.0f;
+  float split_global_tone = 1.0f;
+  int split_global_style = 0;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -550,11 +555,11 @@ inline bool CreateTextures(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_
 
 // Model tuning, all defaults. Read at create, re-written at evaluate because the block is shared
 // with the game's own DLSS, which overwrites values between frames.
-inline void WriteTuning(void* p) {
-  SetFloat(p, "DLSSNR.Intensity", s.intensity);
-  SetUInt(p, "DLSSNR.Style", (unsigned)s.style);
-  SetFloat(p, "DLSSNR.LocalStructureStrength", s.local_structure);
-  SetFloat(p, "DLSSNR.LocalToneStrength", s.local_tone);
+inline void WriteTuning(void* p, bool periphery) {
+  SetFloat(p, "DLSSNR.Intensity", periphery ? s.split_global_intensity : s.intensity);
+  SetUInt(p, "DLSSNR.Style", (unsigned)(periphery ? s.split_global_style : s.style));
+  SetFloat(p, "DLSSNR.LocalStructureStrength", periphery ? s.split_global_structure : s.local_structure);
+  SetFloat(p, "DLSSNR.LocalToneStrength", periphery ? s.split_global_tone : s.local_tone);
   SetFloat(p, "DLSSNR.SkinStructureStrength", s.skin_structure);
   if (s.auto_mask >= 0) SetUInt(p, "DLSSNR.UseAutoMask", (unsigned)s.auto_mask);
   if (s.ui_correction >= 0) SetUInt(p, "DLSSNR.UICorrection", (unsigned)s.ui_correction);
@@ -592,14 +597,14 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   unsigned fw = 0, fh = 0;
   FeatureSize(&fw, &fh);
   void* p = s.caps;
-  auto create = [&](unsigned w, unsigned h, int preset) {
+  auto create = [&](unsigned w, unsigned h, int preset, bool periphery) {
     SetUInt(p, "DLSSNR.Enabled", 1u);
     SetUInt(p, "DLSSNR.Width", w);
     SetUInt(p, "DLSSNR.Height", h);
     SetUInt(p, "CreationNodeMask", 1u);
     SetUInt(p, "VisibilityNodeMask", 1u);
     SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)preset);
-    WriteTuning(p);
+    WriteTuning(p, periphery);
     int create_result = 0;
     void* f = s.create(cmd, s.caps, &create_result);
     ngx_probe::Logf("nr-fwd: CreateFeature(18) %ux%u => 0x%x (%s) handle=%p", w, h,
@@ -609,16 +614,16 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   const int calls = WantedCalls();
   if (calls == 2) {
     const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
-    s.feature = create(l.crop_w, l.crop_h, s.preset);
+    s.feature = create(l.crop_w, l.crop_h, s.preset, false);
     s.feature2 = s.feature != nullptr
-                     ? create(l.low_w, l.low_h, s.split_global_preset >= 0 ? s.split_global_preset : s.preset)
+                     ? create(l.low_w, l.low_h, s.split_global_preset >= 0 ? s.split_global_preset : s.preset, true)
                      : nullptr;
     if (s.feature2 == nullptr) {
       if (s.feature != nullptr) Bury(nullptr, s.feature);
       s.feature = nullptr;
     }
   } else {
-    s.feature = create(fw, fh, s.preset);
+    s.feature = create(fw, fh, s.preset, false);
   }
   if (s.feature == nullptr) return GiveUp("feature creation failed");
   s.feature_calls = calls;
@@ -767,7 +772,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
 
     SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
-    WriteTuning(p);
+    WriteTuning(p, feature == s.feature2);
     return s.evaluate(cmd, feature, s.caps);
   };
   int result;
@@ -810,10 +815,12 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
 
   // Anchor the model's answer to the original and write the blend into the game's output, which
   // its post-processing reads next.
+  // A per-pass debug view is already drawn into the expanded answer: show that answer untouched.
+  const bool pass_debug = foveated && split && s.feature_calls == 2 && fov::PassDebug() != 0;
   nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.frame_w, s.frame_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
-                         (uint32_t)s.debug_view);
-  if (foveated && s.debug_view == 4) fov::DebugMap(cmd, color, frame, split);
+                         pass_debug ? 2u : (uint32_t)s.debug_view);
+  if (foveated && !pass_debug && s.debug_view == 4) fov::DebugMap(cmd, color, frame, split);
   diag::Mark(cmd, diag::kResolve);
   diag::End(cmd);
 

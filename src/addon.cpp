@@ -127,6 +127,10 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GlobalToneStrength", s.global_tone);
   reshade::get_config_value(nullptr, kConfigSection, "ScalingRatio", s.scaling_ratio);
   reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalPreset", s.split_global_preset);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalIntensity", s.split_global_intensity);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalStructureIntensity", s.split_global_structure);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalGlobalIntensity", s.split_global_tone);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalStyle", s.split_global_style);
   reshade::get_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   auto& f = fov::settings;
@@ -146,6 +150,8 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::get_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
+  reshade::get_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
+  reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
 
   // A hand-edited ini must not push values past what the overlay allows.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -157,6 +163,13 @@ void LoadSettings() {
   s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
+  s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 2.0f);
+  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 2.0f);
+  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 2.0f);
+  if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
+  if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
+  if (f.fovea_debug < 0 || f.fovea_debug > 3) f.fovea_debug = 0;
+  if (f.periphery_debug < 0 || f.periphery_debug > 3) f.periphery_debug = 0;
   f.width = Clamp(f.width, 0.05f, 1.0f);
   f.height = Clamp(f.height, 0.05f, 1.0f);
   f.falloff = Clamp(f.falloff, 0.0f, 0.5f);
@@ -191,6 +204,10 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GlobalToneStrength", s.global_tone);
   reshade::set_config_value(nullptr, kConfigSection, "ScalingRatio", s.scaling_ratio);
   reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalPreset", s.split_global_preset);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalIntensity", s.split_global_intensity);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalStructureIntensity", s.split_global_structure);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalGlobalIntensity", s.split_global_tone);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalStyle", s.split_global_style);
   reshade::set_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   const auto& f = fov::settings;
@@ -210,6 +227,8 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::set_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
+  reshade::set_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
+  reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
 }
 
 // --- live settings from another process ----------------------------------
@@ -254,6 +273,8 @@ void PollLiveSettings() {
   const int old_preset = s.preset, old_style = s.style;
   const int old_ints[4] = {s.mask_blend_mode, s.ui_correction, s.auto_mask, s.split_global_preset};
   const float old_floats[3] = {s.skin_structure, s.global_tone, s.scaling_ratio};
+  const float old_periphery[4] = {s.split_global_intensity, s.split_global_structure, s.split_global_tone,
+                                  (float)s.split_global_style};
 
   nr_runner::SetEnabled(LiveInt(path, "Enabled", nr_runner::IsEnabled() ? 1 : 0) != 0);
   s.debug_view = LiveInt(path, "DebugView", s.debug_view);
@@ -273,6 +294,10 @@ void PollLiveSettings() {
   s.global_tone = LiveFloat(path, "GlobalToneStrength", s.global_tone);
   s.scaling_ratio = LiveFloat(path, "ScalingRatio", s.scaling_ratio);
   s.split_global_preset = LiveInt(path, "SplitGlobalPreset", s.split_global_preset);
+  s.split_global_intensity = LiveFloat(path, "SplitGlobalIntensity", s.split_global_intensity);
+  s.split_global_structure = LiveFloat(path, "SplitGlobalStructureIntensity", s.split_global_structure);
+  s.split_global_tone = LiveFloat(path, "SplitGlobalGlobalIntensity", s.split_global_tone);
+  s.split_global_style = LiveInt(path, "SplitGlobalStyle", s.split_global_style);
   s.before_upscale = LiveInt(path, "BeforeUpscale", s.before_upscale ? 1 : 0) != 0;
   f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
   f.width = LiveFloat(path, "FoveaWidth", f.width);
@@ -289,6 +314,8 @@ void PollLiveSettings() {
   f.tone_smoothing = LiveFloat(path, "ToneSmoothing", f.tone_smoothing);
   f.tone_deadband = LiveFloat(path, "ToneDeadband", f.tone_deadband);
   f.global_every = LiveInt(path, "GlobalEvery", f.global_every);
+  f.fovea_debug = LiveInt(path, "FoveaDebugView", f.fovea_debug);
+  f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
@@ -301,6 +328,13 @@ void PollLiveSettings() {
   s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
+  s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 2.0f);
+  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 2.0f);
+  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 2.0f);
+  if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
+  if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
+  if (f.fovea_debug < 0 || f.fovea_debug > 3) f.fovea_debug = 0;
+  if (f.periphery_debug < 0 || f.periphery_debug > 3) f.periphery_debug = 0;
   if (s.debug_view < 0 || s.debug_view > 4) s.debug_view = 0;
   f.width = Clamp(f.width, 0.05f, 1.0f);
   f.height = Clamp(f.height, 0.05f, 1.0f);
@@ -320,7 +354,9 @@ void PollLiveSettings() {
   if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
       s.local_tone != old_model[2] || s.preset != old_preset || s.style != old_style ||
       s.mask_blend_mode != old_ints[0] || s.ui_correction != old_ints[1] || s.auto_mask != old_ints[2] || s.split_global_preset != old_ints[3] ||
-      s.skin_structure != old_floats[0] || s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2])
+      s.skin_structure != old_floats[0] || s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2] ||
+      s.split_global_intensity != old_periphery[0] || s.split_global_structure != old_periphery[1] ||
+      s.split_global_tone != old_periphery[2] || (float)s.split_global_style != old_periphery[3])
     nr_runner::ApplyModelSettings();
   SaveSettings();
   ngx_probe::Log("nr-fwd: live settings applied from dlssnr-linux-live.ini");
@@ -421,6 +457,22 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
     changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
     changed |= ImGui::SliderInt("Whole-frame pass every", &f.global_every, 1, 4, "%d frames");
+    if (f.split_calls == 2) {
+      // Each pass is its own feature: its own network and hand, and a debug view of it alone.
+      static const char kPassViews[] = "Off\0What the model sees\0Model answer\0Difference x20\0";
+      ImGui::TextUnformatted("Fovea pass (full-res crop): the model settings above");
+      changed |= ImGui::Combo("Fovea pass debug view", &f.fovea_debug, kPassViews);
+      ImGui::TextUnformatted("Periphery pass (low-res whole frame)");
+      changed |= ImGui::Combo("Periphery pass debug view", &f.periphery_debug, kPassViews);
+      bool model = false;
+      model |= SliderWithReset("Periphery NR intensity", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Periphery structure intensity", &s.split_global_structure, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Periphery global intensity", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= ImGui::SliderInt("Periphery preset", &s.split_global_preset, -1, 7, s.split_global_preset < 0 ? "same as fovea" : "%d");
+      model |= ImGui::Combo("Periphery style", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
+      if (model) nr_runner::ApplyModelSettings();
+      changed |= model;
+    }
   }
   changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
   if (f.gaze_source == 1) {

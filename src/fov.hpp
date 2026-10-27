@@ -52,7 +52,7 @@ constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploa
 enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
 constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the LUT), u0-u2
-constexpr uint32_t kConstants = 29;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kConstants = 30;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -74,6 +74,10 @@ struct Settings {
   float tone_smoothing = 0.95f; // split: weight of the carried tone history where the scene is still
   float tone_deadband = 0.01f;  // split: input change (display units) below which the tone holds
   int global_every = 1;        // split: run the whole-frame pass every Nth frame (history between)
+  // Split with two calls: a debug view of one pass alone (0 off, 1 what it sees, 2 its answer,
+  // 3 what it changed x20). The fovea pass wins when both are set.
+  int fovea_debug = 0;
+  int periphery_debug = 0;
 };
 
 inline Settings settings;
@@ -784,6 +788,13 @@ inline bool NeedsGlobal() { return !g.hist_valid; }
 // Split mode's Expand: the tone transfer and the blend into the full-size answer (UNORDERED_ACCESS,
 // as the resolve expects it). `proxy` is the model's full-size input, NON_PIXEL_SHADER_RESOURCE;
 // `motion` the game's motion vectors; `global_fresh` whether the whole-frame pass ran this frame.
+// The expand shader's pass debug code: 0 off, 1-3 the fovea pass's view, 4-6 the periphery's.
+inline uint32_t PassDebug() {
+  if (settings.fovea_debug > 0) return (uint32_t)settings.fovea_debug;
+  if (settings.periphery_debug > 0) return 3u + (uint32_t)settings.periphery_debug;
+  return 0u;
+}
+
 inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, ID3D12Resource* proxy,
                         ID3D12Resource* motion, uint32_t frame, bool global_fresh) {
   ID3D12Device* device = nullptr;
@@ -829,8 +840,9 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   cmd->Dispatch(gx, gy, 1);
 
   for (int i = 6; i < 8; ++i) Barrier(cmd, low[i], kUav, kSrv);
+  c[29] = PassDebug();
   Bind(device, cmd, g.split_pso[3], frame, kSplitExpand,
-       {{g.answer_s, kRgba}, {proxy, kRgba}, {low[6], kRgba}, {low[7], kRgba}, {nullptr, kRgba}},
+       {{g.answer_s, kRgba}, {proxy, kRgba}, {low[6], kRgba}, {low[7], kRgba}, {g.proxy_s, kRgba}},
        {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c);
   cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
 

@@ -47,6 +47,7 @@ cbuffer FovConstants : register(b0)
     float g_tone_alpha; // split blur V: least weight of this frame's whole-frame offset against
                         // the reprojected history (1 = no history, 0 = history only: no new pass)
     float g_tone_deadband; // split blur V: input change (display units) below which the tone holds
+    uint g_pass_debug;     // split expand: 0 off, 1-3 the fovea pass alone, 4-6 the periphery pass alone
 };
 
 // Continuous lookup into a per-pixel-centre table: pos is a coordinate in that table's space
