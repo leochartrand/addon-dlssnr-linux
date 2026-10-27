@@ -180,6 +180,15 @@ struct State {
 
 inline State s;
 
+// The size of the picture the pass works on, for the current mode. Before the upscale only means
+// something when DLSS-SR really upscales; at DLAA (input = output size) both modes are the same.
+inline void UpdateFrameSize() {
+  const bool before = s.before_upscale && s.render_w != 0 && s.render_h != 0 &&
+                      (s.render_w != s.out_w || s.render_h != s.out_h);
+  s.frame_w = before ? s.render_w : s.out_w;
+  s.frame_h = before ? s.render_h : s.out_h;
+}
+
 // The size the NR feature runs at: the display resolution, or the squeezed working size.
 inline void FeatureSize(unsigned* w, unsigned* h) {
   *w = s.frame_w;
@@ -744,15 +753,6 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
                 s.colour_strength, s.max_ratio, wp);
   diag::Capture(cmd, s.color_copy, color, s.eval_count, info, ngx_probe::Log);
   return true;
-}
-
-// The size of the picture the pass works on, for the current mode. Before the upscale only means
-// something when DLSS-SR really upscales; at DLAA (input = output size) both modes are the same.
-inline void UpdateFrameSize() {
-  const bool before = s.before_upscale && s.render_w != 0 && s.render_h != 0 &&
-                      (s.render_w != s.out_w || s.render_h != s.out_h);
-  s.frame_w = before ? s.render_w : s.out_w;
-  s.frame_h = before ? s.render_h : s.out_h;
 }
 
 // Shared by both entry points: housekeeping, then whether the pass may run this frame.
