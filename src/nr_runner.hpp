@@ -804,7 +804,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.frame_w, s.frame_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
                          (uint32_t)s.debug_view);
-  if (foveated && !split && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
+  if (foveated && s.debug_view == 4) fov::DebugMap(cmd, color, frame, split);
   diag::Mark(cmd, diag::kResolve);
   diag::End(cmd);
 

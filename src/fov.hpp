@@ -636,9 +636,13 @@ inline void Expand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, uint3
   device->Release();
 }
 
+inline void SplitConstants(uint32_t* c, const SplitLayout& l, uint32_t full_w, uint32_t full_h,
+                           uint32_t render_w, uint32_t render_h, float mv_x, float mv_y);
+
 // Debug view 4: tint the finished frame by the resolution the model saw there and mark the fovea
 // centre and the raw gaze point. The frame is the game's output, UNORDERED_ACCESS after the resolve.
-inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, uint32_t frame) {
+inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, uint32_t frame,
+                     bool split = false) {
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
   const uint32_t full_w = g.x.full, full_h = g.y.full;
@@ -648,6 +652,7 @@ inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, 
   const float floats[4] = {g.centre_x, g.centre_y, gx, gy};
   uint32_t c[kConstants] = {full_w, full_h, g.x.work, g.y.work, 1, 1, 0, 0,
                             0, full_w + full_h, 2 * (full_w + full_h)};
+  if (split) SplitConstants(c, SplitSize(full_w, full_h), full_w, full_h, 1, 1, 0.0f, 0.0f);
   std::memcpy(&c[11], floats, sizeof(floats));
 
   D3D12_RESOURCE_BARRIER uav = {};
