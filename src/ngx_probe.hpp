@@ -270,8 +270,13 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   } else if (n % kHeartbeatEvery == 0) {
     Logf("ngx-probe: D3D12_EvaluateFeature #%u (alive)", n);
   }
+  // Before the upscale, the pass rewrites DLSS-SR's input and the evaluate reads our copy; after
+  // it (the default), the pass rewrites DLSS-SR's output.
+  ID3D12Resource* const swapped = nr_runner::BeforeDlss(cmd_list, params);
   const auto eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
-  if (eval_result == NVSDK_NGX_Result_Success)
+  if (swapped != nullptr)
+    nr_runner::AfterDlss(cmd_list, params, swapped);
+  else if (eval_result == NVSDK_NGX_Result_Success)
     nr_runner::OnDlssEvaluated(cmd_list, params);
   return eval_result;
 }

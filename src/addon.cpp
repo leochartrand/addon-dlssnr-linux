@@ -120,6 +120,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GlobalIntensity", s.local_tone);
   reshade::get_config_value(nullptr, kConfigSection, "Preset", s.preset);
   reshade::get_config_value(nullptr, kConfigSection, "Style", s.style);
+  reshade::get_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   auto& f = fov::settings;
   reshade::get_config_value(nullptr, kConfigSection, "Foveation", f.enabled);
@@ -163,6 +164,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GlobalIntensity", s.local_tone);
   reshade::set_config_value(nullptr, kConfigSection, "Preset", s.preset);
   reshade::set_config_value(nullptr, kConfigSection, "Style", s.style);
+  reshade::set_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   const auto& f = fov::settings;
   reshade::set_config_value(nullptr, kConfigSection, "Foveation", f.enabled);
@@ -228,6 +230,7 @@ void PollLiveSettings() {
   s.local_tone = LiveFloat(path, "GlobalIntensity", s.local_tone);
   s.preset = LiveInt(path, "Preset", s.preset);
   s.style = LiveInt(path, "Style", s.style);
+  s.before_upscale = LiveInt(path, "BeforeUpscale", s.before_upscale ? 1 : 0) != 0;
   f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
   f.width = LiveFloat(path, "FoveaWidth", f.width);
   f.height = LiveFloat(path, "FoveaHeight", f.height);
@@ -334,6 +337,10 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
 
   if (ImGui::Button("Apply model settings")) nr_runner::ApplyModelSettings();
 
+  // Only differs from the default when the game's DLSS really upscales (input smaller than output).
+  changed |= ImGui::Checkbox("Run before the upscale (the model works at render resolution)",
+                             &s.before_upscale);
+
   // Geometry changes rebuild the feature at its new size by themselves (the next frame); the
   // gaze controls apply live.
   ImGui::Separator();
@@ -352,11 +359,11 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     if (fov::GazeLatest(&gx, &gy)) ImGui::Text("Gaze: %.3f, %.3f", gx, gy);
     else ImGui::TextUnformatted("Gaze: no packets in the last 0.5 s (centre used)");
   }
-  if (s.out_w != 0 && s.out_h != 0) {
+  if (s.frame_w != 0 && s.frame_h != 0) {
     uint32_t fw = 0, fh = 0;
-    fov::WorkSize(s.out_w, s.out_h, &fw, &fh);
-    ImGui::Text("Model works on %ux%u of %ux%u (%.0f%% of the pixels)", fw, fh, s.out_w, s.out_h,
-                100.0 * fw * fh / ((double)s.out_w * s.out_h));
+    nr_runner::FeatureSize(&fw, &fh);
+    ImGui::Text("Model works on %ux%u of %ux%u (%.0f%% of the pixels)", fw, fh, s.frame_w, s.frame_h,
+                100.0 * fw * fh / ((double)s.frame_w * s.frame_h));
   }
 
   if (changed) SaveSettings();

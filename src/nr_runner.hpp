@@ -126,6 +126,7 @@ struct State {
   ID3D12Resource* output = nullptr;      // the model's answer
   ID3D12Resource* color_copy = nullptr;  // the original, copied aside for the resolve
   ID3D12Resource* proxy = nullptr;       // the display-referred picture the model is shown
+  ID3D12Resource* pre_frame = nullptr;   // before_upscale: our copy of DLSS-SR's input, processed
   DXGI_FORMAT output_format = DXGI_FORMAT_UNKNOWN;
 
   // Compose controls (fork semantics: transfer 0 = bypass, 1 = the model's picture; max_ratio
@@ -156,6 +157,12 @@ struct State {
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
   unsigned out_w = 0, out_h = 0;
+  // Where the pass runs: on DLSS-SR's output (the default), or with before_upscale on its
+  // render-resolution input, so the model sees one uniform scale and DLSS-SR upscales its answer.
+  // frame_w/h is the size of the picture the pass works on; textures are built at it.
+  bool before_upscale = false;
+  unsigned frame_w = 0, frame_h = 0;
+  unsigned tex_w = 0, tex_h = 0;
   int create_flags = 0;
   // Geometry the NR feature was built against; a mismatch retires it.
   unsigned feature_w = 0, feature_h = 0;
@@ -175,11 +182,11 @@ inline State s;
 
 // The size the NR feature runs at: the display resolution, or the squeezed working size.
 inline void FeatureSize(unsigned* w, unsigned* h) {
-  *w = s.out_w;
-  *h = s.out_h;
-  if (fov::settings.enabled && s.out_w != 0 && s.out_h != 0) {
+  *w = s.frame_w;
+  *h = s.frame_h;
+  if (fov::settings.enabled && s.frame_w != 0 && s.frame_h != 0) {
     uint32_t fw = 0, fh = 0;
-    fov::WorkSize(s.out_w, s.out_h, &fw, &fh);
+    fov::WorkSize(s.frame_w, s.frame_h, &fw, &fh);
     *w = fw;
     *h = fh;
   }
@@ -347,6 +354,7 @@ inline void OnDlssCreate(unsigned w, unsigned h, unsigned ow, unsigned oh, int f
   s.out_w = ow;
   s.out_h = oh;
   s.create_flags = flags;
+  UpdateFrameSize();
   unsigned fw = 0, fh = 0;
   FeatureSize(&fw, &fh);
   if (s.feature != nullptr && (s.feature_w != fw || s.feature_h != fh))
@@ -376,6 +384,8 @@ inline void Shutdown() {
   s.color_copy = nullptr;
   if (s.proxy != nullptr) s.proxy->Release();
   s.proxy = nullptr;
+  if (s.pre_frame != nullptr) s.pre_frame->Release();
+  s.pre_frame = nullptr;
   for (auto& g : s.graveyard) {
     if (g.resource != nullptr) g.resource->Release();
     if (g.feature != nullptr && s.release != nullptr) s.release(g.feature);
@@ -456,8 +466,8 @@ inline bool CreateTextures(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_
   heap.Type = D3D12_HEAP_TYPE_DEFAULT;
   D3D12_RESOURCE_DESC desc = {};
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  desc.Width = s.out_w;
-  desc.Height = s.out_h;
+  desc.Width = s.frame_w;
+  desc.Height = s.frame_h;
   desc.DepthOrArraySize = 1;
   desc.MipLevels = 1;
   desc.Format = game_desc.Format;
@@ -493,7 +503,9 @@ inline bool CreateTextures(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_
     return GiveUp("texture creation failed");
   }
   s.output_format = game_desc.Format;
-  ngx_probe::Logf("nr-fwd: textures %ux%u format=%u (answer, original, proxy)", s.out_w, s.out_h,
+  s.tex_w = s.frame_w;
+  s.tex_h = s.frame_h;
+  ngx_probe::Logf("nr-fwd: textures %ux%u format=%u (answer, original, proxy)", s.frame_w, s.frame_h,
                   (unsigned)s.output_format);
   return true;
 }
@@ -554,9 +566,12 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   if (s.feature == nullptr) return GiveUp("feature creation failed");
   s.feature_w = fw;
   s.feature_h = fh;
-  if (fw != s.out_w || fh != s.out_h)
+  if (fw != s.frame_w || fh != s.frame_h)
     ngx_probe::Logf("nr-fwd: foveated -- the model runs at %ux%u for a %ux%u frame (%.0f%% of the pixels)",
-                    fw, fh, s.out_w, s.out_h, 100.0 * fw * fh / ((double)s.out_w * s.out_h));
+                    fw, fh, s.frame_w, s.frame_h, 100.0 * fw * fh / ((double)s.frame_w * s.frame_h));
+  if (s.frame_w != s.out_w || s.frame_h != s.out_h)
+    ngx_probe::Logf("nr-fwd: before the upscale -- the pass runs on DLSS-SR's %ux%u input, which it "
+                    "then upscales to %ux%u", s.frame_w, s.frame_h, s.out_w, s.out_h);
   // Evaluate from the next frame on, so the init work this create recorded executes first.
   return false;
 }
@@ -566,7 +581,7 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
 // If the model fails after RecordPre already ran, put every state back so the frame proceeds
 // with the original picture untouched.
 inline void AbortAfterPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_out) {
-  if (s.feature_w != s.out_w || s.feature_h != s.out_h) fov::Abort(cmd);
+  if (s.feature_w != s.frame_w || s.feature_h != s.frame_h) fov::Abort(cmd);
   nr_compose::Barrier(cmd, game_out, D3D12_RESOURCE_STATE_COPY_SOURCE,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   nr_compose::Barrier(cmd, s.color_copy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -575,18 +590,18 @@ inline void AbortAfterPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_o
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
-inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params) {
-  // The game's DLSS output is the frame; the model sees its encoded proxy, and the game's DLSS
-  // guides are the model's guides.
-  ID3D12Resource* color = nullptr;
+// `color` is the picture the pass rewrites in place (UNORDERED_ACCESS on entry and exit, frame_w x
+// frame_h): the game's DLSS output, or our copy of its input. True when the model's answer landed.
+inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params,
+                     ID3D12Resource* color) {
+  // The model sees the frame's encoded proxy, and the game's DLSS guides are the model's guides.
   ID3D12Resource* depth = nullptr;
   ID3D12Resource* motion = nullptr;
-  game_params->Get(NVSDK_NGX_Parameter_Output, &color);
   game_params->Get(NVSDK_NGX_Parameter_Depth, &depth);
   game_params->Get(NVSDK_NGX_Parameter_MotionVectors, &motion);
-  if (color == nullptr || depth == nullptr || motion == nullptr) return;
+  if (color == nullptr || depth == nullptr || motion == nullptr) return false;
 
-  if (!CreateTextures(cmd, color)) return;
+  if (!CreateTextures(cmd, color)) return false;
 
   // Fold the latest luminance reading into the smoothed white point. The reading lags a few
   // frames, which the EMA absorbs; until the first one lands, 1.0 preserves 5b behaviour.
@@ -601,10 +616,10 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   diag::Begin(cmd, s.eval_count, ngx_probe::Log);
 
   // Copy the original aside, encode the display-referred proxy, record the measurement.
-  if (!nr_compose::RecordPre(cmd, color, s.color_copy, s.proxy, s.out_w, s.out_h, s.eval_count,
+  if (!nr_compose::RecordPre(cmd, color, s.color_copy, s.proxy, s.frame_w, s.frame_h, s.eval_count,
                              wp)) {
     GiveUp("compose pipeline initialisation failed");
-    return;
+    return false;
   }
 
   diag::Mark(cmd, diag::kEncode);
@@ -619,14 +634,14 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
 
   // Foveated: the model gets working-size copies (motion vectors already in working pixels) and
   // writes a working-size answer that Expand stretches back below. Built at the feature's size.
-  const bool foveated = s.feature_w != s.out_w || s.feature_h != s.out_h;
+  const bool foveated = s.feature_w != s.frame_w || s.feature_h != s.frame_h;
   ID3D12Resource* in_color = s.proxy;
   ID3D12Resource* in_depth = depth;
   ID3D12Resource* in_motion = motion;
   ID3D12Resource* answer = s.output;
   unsigned guide_w = s.render_w, guide_h = s.render_h;
   if (foveated) {
-    const bool squeezed = fov::Squeeze(cmd, s.proxy, depth, motion, s.out_w, s.out_h, s.render_w,
+    const bool squeezed = fov::Squeeze(cmd, s.proxy, depth, motion, s.frame_w, s.frame_h, s.render_w,
                                        s.render_h, mv_scale_x, mv_scale_y, s.eval_count);
     if (!squeezed || fov::g.x.work != s.feature_w || fov::g.y.work != s.feature_h) {
       // A failed Squeeze transitioned nothing; a size that no longer matches the feature means
@@ -639,7 +654,7 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
       nr_compose::Barrier(cmd, s.proxy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
       s.retire_pending = true;
-      return;
+      return false;
     }
     in_color = fov::g.proxy_s;
     in_depth = fov::g.depth_s;
@@ -703,7 +718,7 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
                       s.fail_streak, ResultName(result));
       s.enabled = false;
     }
-    return;
+    return false;
   }
   s.fail_streak = 0;
   diag::Mark(cmd, diag::kModel);
@@ -712,7 +727,7 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
 
   // Anchor the model's answer to the original and write the blend into the game's output, which
   // its post-processing reads next.
-  nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.out_w, s.out_h,
+  nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.frame_w, s.frame_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
                          (uint32_t)s.debug_view);
   if (foveated && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
@@ -725,30 +740,123 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
                 "centre_x=%.1f\ncentre_y=%.1f\ncolour=%.2f\nguard=%.2f\nwhite_point=%.4f\n",
                 foveated ? 1 : 0, s.feature_w, s.feature_h, fov::settings.width,
                 fov::settings.height, fov::settings.falloff, fov::settings.edge,
-                foveated ? fov::g.centre_x : s.out_w * 0.5f, foveated ? fov::g.centre_y : s.out_h * 0.5f,
+                foveated ? fov::g.centre_x : s.frame_w * 0.5f, foveated ? fov::g.centre_y : s.frame_h * 0.5f,
                 s.colour_strength, s.max_ratio, wp);
   diag::Capture(cmd, s.color_copy, color, s.eval_count, info, ngx_probe::Log);
+  return true;
 }
 
-// Called after every successful game DLSS-SR evaluate, on the game's own command list.
-inline void OnDlssEvaluated(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params) {
-  if (s.gave_up || cmd == nullptr || game_params == nullptr) return;
-  if (s.out_w == 0 || s.out_h == 0) return;  // no DLSS-SR create seen yet
+// The size of the picture the pass works on, for the current mode. Before the upscale only means
+// something when DLSS-SR really upscales; at DLAA (input = output size) both modes are the same.
+inline void UpdateFrameSize() {
+  const bool before = s.before_upscale && s.render_w != 0 && s.render_h != 0 &&
+                      (s.render_w != s.out_w || s.render_h != s.out_h);
+  s.frame_w = before ? s.render_w : s.out_w;
+  s.frame_h = before ? s.render_h : s.out_h;
+}
 
+// Shared by both entry points: housekeeping, then whether the pass may run this frame.
+inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
   TickGraveyard();
   if (s.retire_pending.exchange(false, std::memory_order_relaxed))
     RetireFeature("model settings changed");
-  if (!s.enabled) return;
+  if (!s.enabled) return false;
+  if (s.output != nullptr && (s.tex_w != s.frame_w || s.tex_h != s.frame_h))
+    RetireFeature("the pass moved to the other side of the upscale");
   {
     unsigned fw = 0, fh = 0;
     FeatureSize(&fw, &fh);
     if (s.feature != nullptr && (s.feature_w != fw || s.feature_h != fh))
       RetireFeature("foveation geometry changed");
   }
+  if (!EnsureSetup(cmd)) return false;
+  return EnsureFeature(cmd);
+}
 
-  if (!EnsureSetup(cmd)) return;
-  if (!EnsureFeature(cmd)) return;
-  Evaluate(cmd, game_params);
+inline void Transition(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
+                       D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+  nr_compose::Barrier(cmd, res, from, to);
+}
+
+// Before the game's DLSS-SR evaluate, in before_upscale mode: copy its Color input aside, run the
+// pass on the copy, and point the evaluate's Color at the result. The input is in
+// NON_PIXEL_SHADER_RESOURCE here, as DLSS requires (the Feeder host's contract). Returns the
+// original Color when it was swapped, for AfterDlss to put back; nullptr when nothing changed.
+inline ID3D12Resource* BeforeDlss(ID3D12GraphicsCommandList* cmd,
+                                  const NVSDK_NGX_Parameter* game_params) {
+  if (s.gave_up || cmd == nullptr || game_params == nullptr) return nullptr;
+  if (s.out_w == 0 || s.out_h == 0) return nullptr;  // no DLSS-SR create seen yet
+  UpdateFrameSize();
+  if (s.frame_w == s.out_w && s.frame_h == s.out_h) return nullptr;  // the pass runs after
+  if (!Prepare(cmd)) return nullptr;
+
+  ID3D12Resource* input = nullptr;
+  game_params->Get(NVSDK_NGX_Parameter_Color, &input);
+  if (input == nullptr) return nullptr;
+  const D3D12_RESOURCE_DESC in_desc = input->GetDesc();
+  if (in_desc.Width != s.frame_w || in_desc.Height != s.frame_h) return nullptr;
+
+  if (s.pre_frame != nullptr && s.pre_frame->GetDesc().Format != in_desc.Format) {
+    Bury(s.pre_frame, nullptr);
+    s.pre_frame = nullptr;
+  }
+  if (s.pre_frame != nullptr &&
+      (s.pre_frame->GetDesc().Width != s.frame_w || s.pre_frame->GetDesc().Height != s.frame_h)) {
+    Bury(s.pre_frame, nullptr);
+    s.pre_frame = nullptr;
+  }
+  if (s.pre_frame == nullptr) {
+    ID3D12Device* device = nullptr;
+    if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return nullptr;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc = in_desc;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    desc.MipLevels = 1;
+    desc.DepthOrArraySize = 1;
+    const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                       nullptr, IID_PPV_ARGS(&s.pre_frame));
+    device->Release();
+    if (FAILED(hr)) {
+      s.pre_frame = nullptr;
+      ngx_probe::Logf("nr-fwd: before-upscale frame creation failed 0x%08x", (unsigned)hr);
+      return nullptr;
+    }
+  }
+
+  Transition(cmd, input, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+  cmd->CopyResource(s.pre_frame, input);
+  Transition(cmd, input, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+  if (!Evaluate(cmd, game_params, s.pre_frame)) return nullptr;  // pre_frame is UAV again
+
+  Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  const_cast<NVSDK_NGX_Parameter*>(game_params)->Set(NVSDK_NGX_Parameter_Color, s.pre_frame);
+  NR_TEST_HOOK_AFTER_EVALUATE();
+  return input;
+}
+
+// After the DLSS-SR evaluate that BeforeDlss redirected: restore the game's Color and our state.
+inline void AfterDlss(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params,
+                      ID3D12Resource* original) {
+  const_cast<NVSDK_NGX_Parameter*>(game_params)->Set(NVSDK_NGX_Parameter_Color, original);
+  Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+// Called after every successful game DLSS-SR evaluate, on the game's own command list.
+inline void OnDlssEvaluated(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params) {
+  if (s.gave_up || cmd == nullptr || game_params == nullptr) return;
+  if (s.out_w == 0 || s.out_h == 0) return;  // no DLSS-SR create seen yet
+  UpdateFrameSize();
+  if (s.frame_w != s.out_w || s.frame_h != s.out_h) return;  // the pass ran before the upscale
+  if (!Prepare(cmd)) return;
+
+  ID3D12Resource* color = nullptr;
+  game_params->Get(NVSDK_NGX_Parameter_Output, &color);
+  Evaluate(cmd, game_params, color);
 
   NR_TEST_HOOK_AFTER_EVALUATE();
 }
