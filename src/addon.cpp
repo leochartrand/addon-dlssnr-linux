@@ -372,7 +372,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   changed |= ImGui::Checkbox("Split: full-res crop + low-res frame for the tone", &f.split);
   if (f.split) {
     changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
-    changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 6.0f);
+    changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
     bool two = f.split_calls == 2;
     if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
       f.split_calls = two ? 2 : 1;

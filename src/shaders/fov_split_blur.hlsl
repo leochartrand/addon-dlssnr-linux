@@ -1,7 +1,7 @@
-// Split foveation: a separable Gaussian over the low-resolution change maps. The horizontal pass
-// writes them blurred; the vertical pass finishes the blur and writes the two log gains -- the
-// whole-frame pass's broad change (for the periphery) and that minus the crop's broad change (for
-// the fovea) -- so both regions end up with the same broad brightness and colour.
+// Split foveation: a light separable Gaussian over the low-resolution offsets (it only softens the
+// low-res grid). The vertical pass writes the two offsets the expand adds: the whole-frame pass's
+// (for the periphery) and that minus the crop's (for the fovea), so both regions take their coarse
+// brightness and colour from the same pass.
 #include "fov_common.hlsli"
 
 Texture2D<float4> InGlobal : register(t0);

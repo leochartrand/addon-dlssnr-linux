@@ -18,10 +18,10 @@
 //
 //   split squeeze: proxy -> atlas (crop | low-res frame), depth and motion likewise
 //   model:         the atlas
-//   split low:     the model's change (log answer - log input) of the low-res frame and of the
-//                  crop, at the low resolution
-//   split blur:    Gaussian (H, then V forming the log gains: global change; global - crop change)
-//   split expand:  periphery = input x its gain; fovea = crop answer x its gain, feathered in
+//   split low:     each answer's coarse part as an offset from its input, at the low resolution
+//   split blur:    a light Gaussian (H, then V forming the offsets: global; global - crop)
+//   split expand:  periphery = input + its offset (the low-res answer, plus the input's finer
+//                  detail); fovea = crop answer + its offset, feathered in
 
 #pragma once
 
@@ -69,7 +69,7 @@ struct Settings {
   float jump_reset = 0.20f;  // a move larger than this fraction of the frame resets the history
   bool split = false;        // crop + low-res frame atlas instead of the squeeze (see the top)
   float global_scale = 0.25f;  // split: the low-res frame's size, per axis
-  float grade_blur = 6.0f;     // split: tone blur sigma, in low-res pixels
+  float grade_blur = 1.0f;     // split: softening of the low-res offsets, sigma in low-res pixels
   int split_calls = 2;         // split: 2 = a model call per region (independent grading), 1 = one
 };
 
