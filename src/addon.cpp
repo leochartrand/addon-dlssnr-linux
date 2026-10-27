@@ -152,6 +152,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
   reshade::get_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
+  reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
 
   // A hand-edited ini must not push values past what the overlay allows.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -229,6 +230,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
   reshade::set_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
+  reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
 }
 
 // --- live settings from another process ----------------------------------
@@ -316,6 +318,7 @@ void PollLiveSettings() {
   f.global_every = LiveInt(path, "GlobalEvery", f.global_every);
   f.fovea_debug = LiveInt(path, "FoveaDebugView", f.fovea_debug);
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
+  f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
@@ -463,6 +466,8 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       ImGui::TextUnformatted("Fovea pass (full-res crop): the model settings above");
       changed |= ImGui::Combo("Fovea pass debug view", &f.fovea_debug, kPassViews);
       ImGui::TextUnformatted("Periphery pass (low-res whole frame)");
+      changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
+                                 &f.periphery_pass);
       changed |= ImGui::Combo("Periphery pass debug view", &f.periphery_debug, kPassViews);
       bool model = false;
       model |= SliderWithReset("Periphery NR intensity", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);

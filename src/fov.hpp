@@ -78,6 +78,10 @@ struct Settings {
   // 3 what it changed x20). The fovea pass wins when both are set.
   int fovea_debug = 0;
   int periphery_debug = 0;
+  // Split with two calls: false skips the periphery model call -- outside the crop the picture is the
+  // game's own frame (with whatever lighting shaders run before the feed), inside it the crop's answer
+  // with its own coarse part.
+  bool periphery_pass = true;
 };
 
 inline Settings settings;
@@ -819,6 +823,20 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   std::memcpy(&c[28], &settings.tone_deadband, 4);
 
   Barrier(cmd, g.answer_s, kUav, kSrv);
+  if (!settings.periphery_pass) {
+    // No whole-frame answer: no offsets. Null views read as zero, so the expand passes the input
+    // through outside the crop and keeps the crop's own coarse part inside it.
+    c[29] = PassDebug();
+    Bind(device, cmd, g.split_pso[3], frame, kSplitExpand,
+         {{g.answer_s, kRgba}, {proxy, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}, {g.proxy_s, kRgba}},
+         {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c);
+    cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
+    Barrier(cmd, g.answer_s, kSrv, kUav);
+    g.hist_valid = false;   // the tone history is stale once the pass comes back
+    for (ID3D12Resource* t : {g.proxy_s, g.depth_s, g.motion_s}) Barrier(cmd, t, kSrv, kUav);
+    device->Release();
+    return;
+  }
   Bind(device, cmd, g.split_pso[1], frame, kSplitLow,
        {{g.answer_s, kRgba}, {proxy, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}},
        {{low[0], kRgba}, {low[1], kRgba}, {low[2], kRgba}}, c);

@@ -785,7 +785,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
-    if (result == 1 && global_fresh) {
+    if (result == 1 && global_fresh && fov::settings.periphery_pass) {
       if (every > 1) reset = 1;
       result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
     }
