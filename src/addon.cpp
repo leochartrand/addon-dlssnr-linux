@@ -135,6 +135,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
   reshade::get_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
 
   // A hand-edited ini must not push values past what the overlay allows.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -156,6 +157,7 @@ void LoadSettings() {
   f.jump_reset = Clamp(f.jump_reset, 0.02f, 2.0f);
   f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
   f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
+  if (f.split_calls != 1) f.split_calls = 2;
 }
 
 void SaveSettings() {
@@ -184,6 +186,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
   reshade::set_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
 }
 
 // --- live settings from another process ----------------------------------
@@ -250,6 +253,7 @@ void PollLiveSettings() {
   f.split = LiveInt(path, "FoveaSplit", f.split ? 1 : 0) != 0;
   f.global_scale = LiveFloat(path, "GlobalScale", f.global_scale);
   f.grade_blur = LiveFloat(path, "GradeBlur", f.grade_blur);
+  f.split_calls = LiveInt(path, "SplitCalls", f.split_calls);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
@@ -272,6 +276,7 @@ void PollLiveSettings() {
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
   f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
   f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
+  if (f.split_calls != 1) f.split_calls = 2;
 
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
   if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
@@ -368,6 +373,11 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   if (f.split) {
     changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
     changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 6.0f);
+    bool two = f.split_calls == 2;
+    if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
+      f.split_calls = two ? 2 : 1;
+      changed = true;
+    }
   }
   changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
   if (f.gaze_source == 1) {

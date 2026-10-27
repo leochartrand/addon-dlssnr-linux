@@ -69,6 +69,7 @@ struct Settings {
   bool split = false;        // crop + low-res frame atlas instead of the squeeze (see the top)
   float global_scale = 0.25f;  // split: the low-res frame's size, per axis
   float grade_blur = 6.0f;     // split: tone blur sigma, in low-res pixels
+  int split_calls = 2;         // split: 2 = a model call per region (independent grading), 1 = one
 };
 
 inline Settings settings;

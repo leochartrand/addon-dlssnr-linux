@@ -123,6 +123,10 @@ struct State {
   NVSDK_NGX_Parameter* caps = nullptr;
   bool snippet_inited = false;
   void* feature = nullptr;
+  // Split foveation with two calls: feature runs the crop and feature2 the low-res frame, each on
+  // its own region of the one atlas, so neither's grading sees the other's content.
+  void* feature2 = nullptr;
+  int feature_calls = 0;                 // 1 or 2, as the features were built
   ID3D12Resource* output = nullptr;      // the model's answer
   ID3D12Resource* color_copy = nullptr;  // the original, copied aside for the resolve
   ID3D12Resource* proxy = nullptr;       // the display-referred picture the model is shown
@@ -187,6 +191,11 @@ inline void UpdateFrameSize() {
                       (s.render_w != s.out_w || s.render_h != s.out_h);
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
+}
+
+// Model calls per frame the current settings ask for: 2 for split foveation in separate calls.
+inline int WantedCalls() {
+  return fov::settings.enabled && fov::settings.split && fov::settings.split_calls == 2 ? 2 : 1;
 }
 
 // The size the NR feature runs at: the display resolution, or the squeezed working size.
@@ -345,6 +354,9 @@ inline void RetireFeature(const char* why) {
   if (s.feature == nullptr && s.output == nullptr) return;
   ngx_probe::Logf("nr-fwd: retiring NR feature (%s)", why);
   Bury(s.output, s.feature);
+  Bury(nullptr, s.feature2);
+  s.feature2 = nullptr;
+  s.feature_calls = 0;
   Bury(s.color_copy, nullptr);
   Bury(s.proxy, nullptr);
   s.feature = nullptr;
@@ -387,6 +399,8 @@ inline void Shutdown() {
   }
   if (s.feature != nullptr && s.release != nullptr) s.release(s.feature);
   s.feature = nullptr;
+  if (s.feature2 != nullptr && s.release != nullptr) s.release(s.feature2);
+  s.feature2 = nullptr;
   if (s.output != nullptr) s.output->Release();
   s.output = nullptr;
   if (s.color_copy != nullptr) s.color_copy->Release();
@@ -559,20 +573,35 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   unsigned fw = 0, fh = 0;
   FeatureSize(&fw, &fh);
   void* p = s.caps;
-  SetUInt(p, "DLSSNR.Enabled", 1u);
-  SetUInt(p, "DLSSNR.Width", fw);
-  SetUInt(p, "DLSSNR.Height", fh);
-  SetUInt(p, "CreationNodeMask", 1u);
-  SetUInt(p, "VisibilityNodeMask", 1u);
-  SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)s.preset);
-  SetUInt(p, "DLSSNR.UICorrection", 1u);
-  WriteTuning(p);
-
-  int create_result = 0;
-  s.feature = s.create(cmd, s.caps, &create_result);
-  ngx_probe::Logf("nr-fwd: CreateFeature(18) => 0x%x (%s) handle=%p", (unsigned)create_result,
-                  ResultName(create_result), s.feature);
+  auto create = [&](unsigned w, unsigned h) {
+    SetUInt(p, "DLSSNR.Enabled", 1u);
+    SetUInt(p, "DLSSNR.Width", w);
+    SetUInt(p, "DLSSNR.Height", h);
+    SetUInt(p, "CreationNodeMask", 1u);
+    SetUInt(p, "VisibilityNodeMask", 1u);
+    SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)s.preset);
+    SetUInt(p, "DLSSNR.UICorrection", 1u);
+    WriteTuning(p);
+    int create_result = 0;
+    void* f = s.create(cmd, s.caps, &create_result);
+    ngx_probe::Logf("nr-fwd: CreateFeature(18) %ux%u => 0x%x (%s) handle=%p", w, h,
+                    (unsigned)create_result, ResultName(create_result), f);
+    return f;
+  };
+  const int calls = WantedCalls();
+  if (calls == 2) {
+    const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
+    s.feature = create(l.crop_w, l.crop_h);
+    s.feature2 = s.feature != nullptr ? create(l.low_w, l.low_h) : nullptr;
+    if (s.feature2 == nullptr) {
+      if (s.feature != nullptr) Bury(nullptr, s.feature);
+      s.feature = nullptr;
+    }
+  } else {
+    s.feature = create(fw, fh);
+  }
   if (s.feature == nullptr) return GiveUp("feature creation failed");
+  s.feature_calls = calls;
   s.feature_w = fw;
   s.feature_h = fh;
   if (fw != s.frame_w || fh != s.frame_h)
@@ -682,41 +711,53 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   diag::Mark(cmd, diag::kSqueeze);
 
   void* p = s.caps;
-  SetResource(p, "DLSSNR.Color", in_color);
-  SetResource(p, "DLSSNR.Depth", in_depth);
-  SetResource(p, "DLSSNR.MVec", in_motion);
-  SetResource(p, "DLSSNR.Output", answer);
-
-  SetUInt(p, "DLSSNR.Enabled", 1u);
-  SetUInt(p, "DLSSNR.Width", s.feature_w);
-  SetUInt(p, "DLSSNR.Height", s.feature_h);
-  SetUInt(p, "DLSSNR.DepthInverted", depth_inverted ? 1u : 0u);
-  SetUInt(p, "DLSSNR.Reset", reset != 0 ? 1u : 0u);
-
-  SetUInt(p, "DLSSNR.ColorSubrectBaseX", 0u);
-  SetUInt(p, "DLSSNR.ColorSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.ColorSubrectWidth", s.feature_w);
-  SetUInt(p, "DLSSNR.ColorSubrectHeight", s.feature_h);
-  SetUInt(p, "DLSSNR.OutputSubrectBaseX", 0u);
-  SetUInt(p, "DLSSNR.OutputSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.OutputSubrectWidth", s.feature_w);
-  SetUInt(p, "DLSSNR.OutputSubrectHeight", s.feature_h);
-  SetUInt(p, "DLSSNR.DepthSubrectBaseX", 0u);
-  SetUInt(p, "DLSSNR.DepthSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.DepthSubrectWidth", guide_w);
-  SetUInt(p, "DLSSNR.DepthSubrectHeight", guide_h);
-  SetUInt(p, "DLSSNR.MVecSubrectBaseX", 0u);
-  SetUInt(p, "DLSSNR.MVecSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.MVecSubrectWidth", guide_w);
-  SetUInt(p, "DLSSNR.MVecSubrectHeight", guide_h);
-
-  SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
-  SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
-  WriteTuning(p);
-
   const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
   const uint32_t n = ++s.eval_count;
-  const int result = s.evaluate(cmd, s.feature, s.caps);
+  // One model call on a region of the inputs (the guides' region scales with them).
+  auto call = [&](void* feature, unsigned x, unsigned y, unsigned w, unsigned h) {
+    const unsigned gx = x * guide_w / s.feature_w, gy = y * guide_h / s.feature_h;
+    const unsigned gw = w * guide_w / s.feature_w, gh = h * guide_h / s.feature_h;
+    SetResource(p, "DLSSNR.Color", in_color);
+    SetResource(p, "DLSSNR.Depth", in_depth);
+    SetResource(p, "DLSSNR.MVec", in_motion);
+    SetResource(p, "DLSSNR.Output", answer);
+
+    SetUInt(p, "DLSSNR.Enabled", 1u);
+    SetUInt(p, "DLSSNR.Width", w);
+    SetUInt(p, "DLSSNR.Height", h);
+    SetUInt(p, "DLSSNR.DepthInverted", depth_inverted ? 1u : 0u);
+    SetUInt(p, "DLSSNR.Reset", reset != 0 ? 1u : 0u);
+
+    SetUInt(p, "DLSSNR.ColorSubrectBaseX", x);
+    SetUInt(p, "DLSSNR.ColorSubrectBaseY", y);
+    SetUInt(p, "DLSSNR.ColorSubrectWidth", w);
+    SetUInt(p, "DLSSNR.ColorSubrectHeight", h);
+    SetUInt(p, "DLSSNR.OutputSubrectBaseX", x);
+    SetUInt(p, "DLSSNR.OutputSubrectBaseY", y);
+    SetUInt(p, "DLSSNR.OutputSubrectWidth", w);
+    SetUInt(p, "DLSSNR.OutputSubrectHeight", h);
+    SetUInt(p, "DLSSNR.DepthSubrectBaseX", gx);
+    SetUInt(p, "DLSSNR.DepthSubrectBaseY", gy);
+    SetUInt(p, "DLSSNR.DepthSubrectWidth", gw);
+    SetUInt(p, "DLSSNR.DepthSubrectHeight", gh);
+    SetUInt(p, "DLSSNR.MVecSubrectBaseX", gx);
+    SetUInt(p, "DLSSNR.MVecSubrectBaseY", gy);
+    SetUInt(p, "DLSSNR.MVecSubrectWidth", gw);
+    SetUInt(p, "DLSSNR.MVecSubrectHeight", gh);
+
+    SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
+    SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
+    WriteTuning(p);
+    return s.evaluate(cmd, feature, s.caps);
+  };
+  int result;
+  if (foveated && split && s.feature_calls == 2) {
+    const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
+    result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
+    if (result == 1) result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
+  } else {
+    result = call(s.feature, 0, 0, s.feature_w, s.feature_h);
+  }
 
   if (n <= kFullLogs || n % kHeartbeatEvery == 0) {
     ngx_probe::Logf("nr-fwd: EvaluateFeature #%u => 0x%x (%s)", n, (unsigned)result,
@@ -773,6 +814,8 @@ inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
     FeatureSize(&fw, &fh);
     if (s.feature != nullptr && (s.feature_w != fw || s.feature_h != fh))
       RetireFeature("foveation geometry changed");
+    if (s.feature != nullptr && s.feature_calls != WantedCalls())
+      RetireFeature("split calls changed");
   }
   if (!EnsureSetup(cmd)) return false;
   return EnsureFeature(cmd);
