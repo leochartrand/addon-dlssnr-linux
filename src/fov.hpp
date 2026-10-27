@@ -52,7 +52,7 @@ constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploa
 enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
 constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the LUT), u0-u2
-constexpr uint32_t kConstants = 27;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kConstants = 28;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -71,6 +71,8 @@ struct Settings {
   float global_scale = 0.25f;  // split: the low-res frame's size, per axis
   float grade_blur = 1.0f;     // split: softening of the low-res offsets, sigma in low-res pixels
   int split_calls = 2;         // split: 2 = a model call per region (independent grading), 1 = one
+  float tone_smoothing = 0.7f; // split: weight of the carried tone history each frame (0 = none)
+  int global_every = 1;        // split: run the whole-frame pass every Nth frame (history between)
 };
 
 inline Settings settings;
@@ -234,8 +236,12 @@ struct State {
   uint32_t tex_w = 0, tex_h = 0;
 
   // Split mode: the low-resolution pictures (UNORDERED_ACCESS between frames) and the crop.
-  ID3D12Resource* low[8] = {};   // global, input, crop; their H blur; the two gains
+  ID3D12Resource* low[10] = {};  // global, input, crop; their H blur; the two offsets; tone history x2
   uint32_t low_w = 0, low_h = 0;
+  uint32_t hist_flip = 0;        // which of low[8], low[9] holds last frame's tone
+  bool hist_valid = false;
+  uint32_t render_w = 0, render_h = 0;   // the motion vectors' size and scale, for the history
+  float mv_x = 1.0f, mv_y = 1.0f;
   uint32_t crop_x = 0, crop_y = 0;
   int prev_crop_x = -1, prev_crop_y = -1;
 
@@ -671,6 +677,7 @@ inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, 
 inline bool EnsureLowTextures(ID3D12Device* device, uint32_t w, uint32_t h) {
   if (g.low[0] != nullptr && g.low_w == w && g.low_h == h) return true;
   for (auto*& r : g.low) Bury(r);
+  g.hist_valid = false;
   D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_DEFAULT};
   D3D12_RESOURCE_DESC desc = {};
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -735,7 +742,12 @@ inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, 
     g.prev_crop_x = (int)g.crop_x;   // first frame, or a new layout: start the history over
     g.prev_crop_y = (int)g.crop_y;
     g.reset = true;
+    g.hist_valid = false;
   }
+  g.render_w = render_w;
+  g.render_h = render_h;
+  g.mv_x = mv_scale_x;
+  g.mv_y = mv_scale_y;
   // The squeeze's tables do not describe this mapping: drop them, so going back rebuilds them.
   g.x = {};
   g.y = {};
@@ -765,10 +777,14 @@ inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, 
   return true;
 }
 
+// Whether the whole-frame pass must run this frame: there is no tone history to carry yet.
+inline bool NeedsGlobal() { return !g.hist_valid; }
+
 // Split mode's Expand: the tone transfer and the blend into the full-size answer (UNORDERED_ACCESS,
-// as the resolve expects it). `proxy` is the model's full-size input, NON_PIXEL_SHADER_RESOURCE.
+// as the resolve expects it). `proxy` is the model's full-size input, NON_PIXEL_SHADER_RESOURCE;
+// `motion` the game's motion vectors; `global_fresh` whether the whole-frame pass ran this frame.
 inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, ID3D12Resource* proxy,
-                        uint32_t frame) {
+                        ID3D12Resource* motion, uint32_t frame, bool global_fresh) {
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
   const uint32_t full_w = g.x.full, full_h = g.y.full;
@@ -779,9 +795,15 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   // SplitSqueeze already advanced prev_crop to this frame's crop; the passes below only need
   // the current one.
   uint32_t c[kConstants] = {};
-  SplitConstants(c, l, full_w, full_h, 1, 1, 0.0f, 0.0f);
+  SplitConstants(c, l, full_w, full_h, g.render_w, g.render_h, g.mv_x, g.mv_y);
   const uint32_t gx = (l.low_w + 7) / 8, gy = (l.low_h + 7) / 8;
   ID3D12Resource* const* low = g.low;
+  ID3D12Resource* const hist_prev = low[8 + g.hist_flip];
+  ID3D12Resource* const hist_next = low[9 - g.hist_flip];
+  float smoothing = settings.tone_smoothing;
+  smoothing = smoothing < 0.0f ? 0.0f : (smoothing > 0.95f ? 0.95f : smoothing);
+  const float alpha = !g.hist_valid ? 1.0f : (global_fresh ? 1.0f - smoothing : 0.0f);
+  std::memcpy(&c[27], &alpha, 4);
 
   Barrier(cmd, g.answer_s, kUav, kSrv);
   Bind(device, cmd, g.split_pso[1], frame, kSplitLow,
@@ -797,10 +819,11 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   cmd->Dispatch(gx, gy, 1);
 
   for (int i = 3; i < 6; ++i) Barrier(cmd, low[i], kUav, kSrv);
+  Barrier(cmd, hist_prev, kUav, kSrv);
   c[25] = 1;
   Bind(device, cmd, g.split_pso[2], frame, kSplitBlurV,
-       {{low[3], kRgba}, {low[4], kRgba}, {low[5], kRgba}, {nullptr, kRgba}, {nullptr, kRgba}},
-       {{low[6], kRgba}, {low[7], kRgba}, {nullptr, kRgba}}, c);
+       {{low[3], kRgba}, {low[4], kRgba}, {low[5], kRgba}, {hist_prev, kRgba}, {motion, kRg16}},
+       {{low[6], kRgba}, {low[7], kRgba}, {hist_next, kRgba}}, c);
   cmd->Dispatch(gx, gy, 1);
 
   for (int i = 6; i < 8; ++i) Barrier(cmd, low[i], kUav, kSrv);
@@ -810,7 +833,10 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
 
   for (int i = 0; i < 8; ++i) Barrier(cmd, low[i], kSrv, kUav);
+  Barrier(cmd, hist_prev, kSrv, kUav);
   Barrier(cmd, g.answer_s, kSrv, kUav);
+  g.hist_flip ^= 1u;
+  g.hist_valid = true;
   for (ID3D12Resource* t : {g.proxy_s, g.depth_s, g.motion_s}) Barrier(cmd, t, kSrv, kUav);
   device->Release();
 }

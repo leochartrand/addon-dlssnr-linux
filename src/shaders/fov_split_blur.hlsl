@@ -1,12 +1,17 @@
 // Split foveation: a light separable Gaussian over the low-resolution offsets (it only softens the
 // low-res grid). The vertical pass writes the two offsets the expand adds: the whole-frame pass's
 // (for the periphery) and that minus the crop's (for the fovea), so both regions take their coarse
-// brightness and colour from the same pass.
+// brightness and colour from the same pass. The whole-frame offset is also blended over time with
+// last frame's, carried along the motion vectors, so the tone map -- shadows above all -- holds
+// still while the camera moves; on frames where the whole-frame pass did not run, the carried
+// history is used alone.
 #include "fov_common.hlsli"
 
 Texture2D<float4> InGlobal : register(t0);
 Texture2D<float4> InInput : register(t1);
 Texture2D<float4> InCrop : register(t2);
+Texture2D<float4> History : register(t4);   // V pass: last frame's whole-frame offset
+Texture2D<float2> Motion : register(t5);    // V pass: the game's motion vectors, render size
 RWTexture2D<float4> OutA : register(u0);
 RWTexture2D<float4> OutB : register(u1);
 RWTexture2D<float4> OutC : register(u2);
@@ -44,7 +49,21 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     else
     {
-        OutA[id.xy] = float4(gl.rgb, 0.0);
-        OutB[id.xy] = float4(gl.rgb - cr.rgb, 0.0);
+        float3 tone = gl.rgb;
+        if (g_tone_alpha < 1.0)
+        {
+            // Game convention: previous position = current + mv * scale, in render pixels.
+            float2 full = ((float2)id.xy + 0.5) * float2(g_full_w, g_full_h) / float2(g_low_w, g_low_h);
+            float2 to_render = float2(g_render_w, g_render_h) / float2(g_full_w, g_full_h);
+            uint2 rp = min((uint2)(full * to_render), uint2(g_render_w - 1, g_render_h - 1));
+            float2 prev_uv = (full + Motion[rp] * float2(g_mv_scale_x, g_mv_scale_y) / to_render) /
+                             float2(g_full_w, g_full_h);
+            bool on_screen = all(prev_uv >= 0.0) && all(prev_uv <= 1.0);
+            float a = on_screen ? g_tone_alpha : 1.0;
+            tone = lerp(History.SampleLevel(Linear, prev_uv, 0).rgb, gl.rgb, a);
+        }
+        OutA[id.xy] = float4(tone, 0.0);
+        OutB[id.xy] = float4(tone - cr.rgb, 0.0);
+        OutC[id.xy] = float4(tone, 0.0);
     }
 }

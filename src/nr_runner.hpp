@@ -771,10 +771,19 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     return s.evaluate(cmd, feature, s.caps);
   };
   int result;
+  // Split: the whole-frame pass may run only every Nth frame, the tone history carrying it in
+  // between. Its feature then sees frames N apart with one frame's motion vectors, so it is reset
+  // each time and the history does the temporal smoothing instead.
+  bool global_fresh = true;
   if (foveated && split && s.feature_calls == 2) {
     const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
+    const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
+    global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
-    if (result == 1) result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
+    if (result == 1 && global_fresh) {
+      if (every > 1) reset = 1;
+      result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
+    }
   } else {
     result = call(s.feature, 0, 0, s.feature_w, s.feature_h);
   }
@@ -795,7 +804,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   }
   s.fail_streak = 0;
   diag::Mark(cmd, diag::kModel);
-  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, frame);
+  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
   else if (foveated) fov::Expand(cmd, s.output, frame);
   diag::Mark(cmd, diag::kExpand);
 

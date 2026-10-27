@@ -44,6 +44,8 @@ cbuffer FovConstants : register(b0)
     float g_feather;   // split: blend from the crop's edge inwards, full pixels
     uint g_blur_axis;  // split blur: 0 horizontal, 1 vertical (and form the gains)
     float g_sigma;     // split blur: Gaussian sigma, low-resolution pixels
+    float g_tone_alpha; // split blur V: weight of this frame's whole-frame offset against the
+                        // reprojected history (1 = no history, 0 = history only)
 };
 
 // Continuous lookup into a per-pixel-centre table: pos is a coordinate in that table's space
