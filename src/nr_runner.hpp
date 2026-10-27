@@ -649,9 +649,12 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   ID3D12Resource* in_motion = motion;
   ID3D12Resource* answer = s.output;
   unsigned guide_w = s.render_w, guide_h = s.render_h;
+  // The mode is read once, so the expand below always matches the squeeze it follows.
+  const bool split = fov::settings.split;
   if (foveated) {
-    const bool squeezed = fov::Squeeze(cmd, s.proxy, depth, motion, s.frame_w, s.frame_h, s.render_w,
-                                       s.render_h, mv_scale_x, mv_scale_y, s.eval_count);
+    const bool squeezed = (split ? fov::SplitSqueeze : fov::Squeeze)(
+        cmd, s.proxy, depth, motion, s.frame_w, s.frame_h, s.render_w, s.render_h, mv_scale_x,
+        mv_scale_y, s.eval_count);
     if (!squeezed || fov::g.x.work != s.feature_w || fov::g.y.work != s.feature_h) {
       // A failed Squeeze transitioned nothing; a size that no longer matches the feature means
       // the settings moved under us -- undo the squeeze and rebuild next frame.
@@ -731,7 +734,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   }
   s.fail_streak = 0;
   diag::Mark(cmd, diag::kModel);
-  if (foveated) fov::Expand(cmd, s.output, frame);
+  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, frame);
+  else if (foveated) fov::Expand(cmd, s.output, frame);
   diag::Mark(cmd, diag::kExpand);
 
   // Anchor the model's answer to the original and write the blend into the game's output, which
@@ -739,15 +743,16 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.frame_w, s.frame_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
                          (uint32_t)s.debug_view);
-  if (foveated && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
+  if (foveated && !split && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
   diag::Mark(cmd, diag::kResolve);
   diag::End(cmd);
 
   char info[384];
   std::snprintf(info, sizeof(info),
-                "foveated=%d\nwork=%ux%u\nfovea_w=%.3f\nfovea_h=%.3f\nfalloff=%.3f\nedge=%.3f\n"
+                "foveated=%d\nsplit=%d\ncrop_x=%u\ncrop_y=%u\nwork=%ux%u\nfovea_w=%.3f\nfovea_h=%.3f\nfalloff=%.3f\nedge=%.3f\n"
                 "centre_x=%.1f\ncentre_y=%.1f\ncolour=%.2f\nguard=%.2f\nwhite_point=%.4f\n",
-                foveated ? 1 : 0, s.feature_w, s.feature_h, fov::settings.width,
+                foveated ? 1 : 0, foveated && split ? 1 : 0, fov::g.crop_x, fov::g.crop_y,
+                s.feature_w, s.feature_h, fov::settings.width,
                 fov::settings.height, fov::settings.falloff, fov::settings.edge,
                 foveated ? fov::g.centre_x : s.frame_w * 0.5f, foveated ? fov::g.centre_y : s.frame_h * 0.5f,
                 s.colour_strength, s.max_ratio, wp);

@@ -11,6 +11,16 @@
 // (the FoveatedDLSS5 geometry). The fovea follows a gaze point when one is streamed in over UDP;
 // motion vectors cross the previous and current mappings so the model's history survives the
 // move, and only a jump resets it.
+//
+// Split mode (FoveaSplit) instead gives the model one atlas: a full-resolution crop around the gaze
+// beside the whole frame at low resolution. The low-resolution answer sets the broad brightness and
+// colour everywhere; the crop only adds its detail, so looking around cannot change the grading:
+//
+//   split squeeze: proxy -> atlas (crop | low-res frame), depth and motion likewise
+//   model:         the atlas
+//   split low:     low-res answer, input and crop answer, side by side at the low resolution
+//   split blur:    Gaussian (H, then V forming the gains answer/input and answer/crop)
+//   split expand:  periphery = input x its gain; fovea = crop answer x its gain, feathered in
 
 #pragma once
 
@@ -30,12 +40,19 @@
 #include "../build/shaders/fov_squeeze_dxil.h"
 #include "../build/shaders/fov_expand_dxil.h"
 #include "../build/shaders/fov_debug_dxil.h"
+#include "../build/shaders/fov_split_squeeze_dxil.h"
+#include "../build/shaders/fov_split_low_dxil.h"
+#include "../build/shaders/fov_split_blur_dxil.h"
+#include "../build/shaders/fov_split_expand_dxil.h"
 
 namespace fov {
 
 constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploads in flight
-constexpr uint32_t kSlotsPerFrame = 21;   // squeeze, expand, debug: 4 SRV + 3 UAV each
-constexpr uint32_t kConstants = 15;       // FovConstants in fov_common.hlsli
+enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
+                       kSplitExpand, kPasses };
+constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the LUT), u0-u2
+constexpr uint32_t kConstants = 27;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
 
@@ -49,6 +66,9 @@ struct Settings {
   int gaze_port = 47620;
   float gaze_smooth_ms = 30.0f;
   float jump_reset = 0.20f;  // a move larger than this fraction of the frame resets the history
+  bool split = false;        // crop + low-res frame atlas instead of the squeeze (see the top)
+  float global_scale = 0.25f;  // split: the low-res frame's size, per axis
+  float grade_blur = 6.0f;     // split: tone blur sigma, in low-res pixels
 };
 
 inline Settings settings;
@@ -196,6 +216,7 @@ struct State {
   ID3D12PipelineState* squeeze_pso = nullptr;
   ID3D12PipelineState* expand_pso = nullptr;
   ID3D12PipelineState* debug_pso = nullptr;
+  ID3D12PipelineState* split_pso[4] = {};   // squeeze, low, blur, expand
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t descriptor_size = 0;
   ID3D12Resource* lut[kRingSize] = {};   // upload heap, persistently mapped
@@ -209,6 +230,12 @@ struct State {
   ID3D12Resource* motion_s = nullptr;
   ID3D12Resource* answer_s = nullptr;
   uint32_t tex_w = 0, tex_h = 0;
+
+  // Split mode: the low-resolution pictures (UNORDERED_ACCESS between frames) and the crop.
+  ID3D12Resource* low[8] = {};   // global, input, crop; their H blur; the two gains
+  uint32_t low_w = 0, low_h = 0;
+  uint32_t crop_x = 0, crop_y = 0;
+  int prev_crop_x = -1, prev_crop_y = -1;
 
   // This frame's mapping, and the one the previous frame used.
   Axis x, y;
@@ -238,6 +265,10 @@ inline void Release() {
   GazeStop();
   for (ID3D12Resource** t : {&g.proxy_s, &g.depth_s, &g.motion_s, &g.answer_s})
     if (*t != nullptr) (*t)->Release();
+  for (auto* r : g.low)
+    if (r != nullptr) r->Release();
+  for (auto* p : g.split_pso)
+    if (p != nullptr) p->Release();
   for (auto*& r : g.lut)
     if (r != nullptr) r->Release();
   for (auto& gr : g.graves)
@@ -250,19 +281,47 @@ inline void Release() {
   g = {};
 }
 
+// Split mode's layout for a frame size: the crop, the low-res frame and the atlas holding both.
+struct SplitLayout {
+  uint32_t crop_w, crop_h, low_w, low_h, low_x, work_w, work_h;
+};
+
+inline SplitLayout SplitSize(uint32_t full_w, uint32_t full_h) {
+  const auto& st = settings;
+  auto len = [](uint32_t full, float f) {
+    uint32_t v = (uint32_t)std::lround(f * full) & ~1u;
+    return v < 16 ? 16 : (v > full ? full : v);
+  };
+  SplitLayout l;
+  l.crop_w = len(full_w, st.width);
+  l.crop_h = len(full_h, st.height);
+  l.low_w = len(full_w, st.global_scale);
+  l.low_h = len(full_h, st.global_scale);
+  l.low_x = l.crop_w + kSplitGap;
+  l.work_w = l.low_x + l.low_w;
+  l.work_h = l.crop_h > l.low_h ? l.crop_h : l.low_h;
+  return l;
+}
+
 // The working size the current settings give, for the NR feature and its textures.
 inline void WorkSize(uint32_t full_w, uint32_t full_h, uint32_t* w, uint32_t* h) {
   const auto& st = settings;
+  if (st.split) {
+    const SplitLayout l = SplitSize(full_w, full_h);
+    *w = l.work_w;
+    *h = l.work_h;
+    return;
+  }
   *w = WorkLength(full_w, st.width * full_w, st.falloff * full_h, st.edge);
   *h = WorkLength(full_h, st.height * full_h, st.falloff * full_h, st.edge);
 }
 
-// Root signature: [0] SRV table t0-t3, [1] UAV table u0-u2, [2] constants b0, static linear s0.
+// Root signature: [0] SRV table t0-t5, [1] UAV table u0-u2, [2] constants b0, static linear s0.
 inline bool Init(ID3D12Device* device) {
   if (g.root_sig != nullptr) return true;
   if (g.failed) return false;
 
-  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0, 0};
+  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0, 0, 0};
   D3D12_DESCRIPTOR_RANGE uav = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0};
   D3D12_ROOT_PARAMETER params[3] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -298,8 +357,16 @@ inline bool Init(ID3D12Device* device) {
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.expand_pso)))) { g.failed = true; return false; }
   pso.CS = {fov_debug_dxil, sizeof(fov_debug_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.debug_pso)))) { g.failed = true; return false; }
+  const D3D12_SHADER_BYTECODE split[4] = {{fov_split_squeeze_dxil, sizeof(fov_split_squeeze_dxil)},
+                                          {fov_split_low_dxil, sizeof(fov_split_low_dxil)},
+                                          {fov_split_blur_dxil, sizeof(fov_split_blur_dxil)},
+                                          {fov_split_expand_dxil, sizeof(fov_split_expand_dxil)}};
+  for (int i = 0; i < 4; ++i) {
+    pso.CS = split[i];
+    if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.split_pso[i])))) { g.failed = true; return false; }
+  }
 
-  D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRingSize * kSlotsPerFrame,
+  D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRingSize * kPasses * kSlotsPerPass,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g.heap)))) { g.failed = true; return false; }
   g.descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -427,6 +494,33 @@ inline void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* r, D3D12_RES
   cmd->ResourceBarrier(1, &x);
 }
 
+// One pass's descriptors in its own slots of this frame's block -- t0-t2, t4, t5 from `srv` and
+// t3 always this frame's LUT, u0-u2 from `uav` -- then its pipeline, tables and constants.
+struct View {
+  ID3D12Resource* r;
+  DXGI_FORMAT fallback;   // the view format when r is null
+};
+
+inline void Bind(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, ID3D12PipelineState* pso,
+                 uint32_t frame, Pass pass, const View (&srv)[5], const View (&uav)[3],
+                 const uint32_t* constants) {
+  const uint32_t base = ((frame % kRingSize) * kPasses + pass) * kSlotsPerPass;
+  const uint32_t reg[5] = {0, 1, 2, 4, 5};
+  for (int i = 0; i < 5; ++i) Srv(device, base + reg[i], srv[i].r, srv[i].fallback);
+  LutSrv(device, base + 3, frame);
+  for (int i = 0; i < 3; ++i) Uav(device, base + 6 + i, uav[i].r, uav[i].fallback);
+  cmd->SetDescriptorHeaps(1, &g.heap);
+  cmd->SetComputeRootSignature(g.root_sig);
+  cmd->SetPipelineState(pso);
+  cmd->SetComputeRootDescriptorTable(0, Gpu(base));
+  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 6));
+  cmd->SetComputeRoot32BitConstants(2, kConstants, constants, 0);
+}
+
+constexpr DXGI_FORMAT kRgba = DXGI_FORMAT_R16G16B16A16_FLOAT;
+constexpr DXGI_FORMAT kR32 = DXGI_FORMAT_R32_FLOAT;
+constexpr DXGI_FORMAT kRg16 = DXGI_FORMAT_R16G16_FLOAT;
+
 // Advance the fovea centre for this frame: the gaze point when one is streaming, the frame centre
 // otherwise, smoothed over gaze_smooth_ms. Returns the centre in full pixels.
 inline void UpdateCentre(uint32_t full_w, uint32_t full_h) {
@@ -500,15 +594,6 @@ inline bool Squeeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D1
   std::memcpy(lut + inv, g.x.inv.data(), g.x.work * 4);
   std::memcpy(lut + inv + g.x.work, g.y.inv.data(), g.y.work * 4);
 
-  const uint32_t base = (frame % kRingSize) * kSlotsPerFrame;
-  Srv(device, base + 0, proxy, DXGI_FORMAT_R16G16B16A16_FLOAT);
-  Srv(device, base + 1, depth, DXGI_FORMAT_R32_FLOAT);
-  Srv(device, base + 2, motion, DXGI_FORMAT_R16G16_FLOAT);
-  LutSrv(device, base + 3, frame);
-  Uav(device, base + 4, g.proxy_s, DXGI_FORMAT_UNKNOWN);
-  Uav(device, base + 5, g.depth_s, DXGI_FORMAT_UNKNOWN);
-  Uav(device, base + 6, g.motion_s, DXGI_FORMAT_UNKNOWN);
-
   uint32_t c[kConstants] = {};
   float f;
   c[0] = full_w; c[1] = full_h; c[2] = g.x.work; c[3] = g.y.work;
@@ -517,12 +602,9 @@ inline bool Squeeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D1
   f = mv_scale_y; std::memcpy(&c[7], &f, 4);
   c[8] = fwd; c[9] = prev; c[10] = inv;
 
-  cmd->SetDescriptorHeaps(1, &g.heap);
-  cmd->SetComputeRootSignature(g.root_sig);
-  cmd->SetPipelineState(g.squeeze_pso);
-  cmd->SetComputeRootDescriptorTable(0, Gpu(base + 0));
-  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 4));
-  cmd->SetComputeRoot32BitConstants(2, kConstants, c, 0);
+  Bind(device, cmd, g.squeeze_pso, frame, kSqueeze,
+       {{proxy, kRgba}, {depth, kR32}, {motion, kRg16}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{g.proxy_s, kRgba}, {g.depth_s, kR32}, {g.motion_s, kRg16}}, c);
   cmd->Dispatch((g.x.work + 7) / 8, (g.y.work + 7) / 8, 1);
 
   for (ID3D12Resource* t : {g.proxy_s, g.depth_s, g.motion_s})
@@ -536,26 +618,14 @@ inline bool Squeeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D1
 inline void Expand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, uint32_t frame) {
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
-  const uint32_t base = (frame % kRingSize) * kSlotsPerFrame + 7;
-
   Barrier(cmd, g.answer_s, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Srv(device, base + 0, g.answer_s, DXGI_FORMAT_UNKNOWN);
-  Srv(device, base + 1, nullptr, DXGI_FORMAT_R32_FLOAT);
-  Srv(device, base + 2, nullptr, DXGI_FORMAT_R16G16_FLOAT);
-  LutSrv(device, base + 3, frame);
-  Uav(device, base + 4, answer, DXGI_FORMAT_UNKNOWN);
-  Uav(device, base + 5, nullptr, DXGI_FORMAT_R32_FLOAT);
-  Uav(device, base + 6, nullptr, DXGI_FORMAT_R16G16_FLOAT);
 
   const uint32_t full_w = g.x.full, full_h = g.y.full;
   uint32_t c[kConstants] = {full_w, full_h, g.x.work, g.y.work, 1, 1, 0, 0,
                             0, full_w + full_h, 2 * (full_w + full_h), 0, 0, 0, 0};
-  cmd->SetDescriptorHeaps(1, &g.heap);
-  cmd->SetComputeRootSignature(g.root_sig);
-  cmd->SetPipelineState(g.expand_pso);
-  cmd->SetComputeRootDescriptorTable(0, Gpu(base + 0));
-  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 4));
-  cmd->SetComputeRoot32BitConstants(2, kConstants, c, 0);
+  Bind(device, cmd, g.expand_pso, frame, kExpand,
+       {{g.answer_s, kRgba}, {nullptr, kR32}, {nullptr, kRg16}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c);
   cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
 
   Barrier(cmd, g.answer_s, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -569,15 +639,6 @@ inline void Expand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, uint3
 inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, uint32_t frame) {
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
-  const uint32_t base = (frame % kRingSize) * kSlotsPerFrame + 14;
-  Srv(device, base + 0, nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
-  Srv(device, base + 1, nullptr, DXGI_FORMAT_R32_FLOAT);
-  Srv(device, base + 2, nullptr, DXGI_FORMAT_R16G16_FLOAT);
-  LutSrv(device, base + 3, frame);
-  Uav(device, base + 4, frame_res, DXGI_FORMAT_UNKNOWN);
-  Uav(device, base + 5, nullptr, DXGI_FORMAT_R32_FLOAT);
-  Uav(device, base + 6, nullptr, DXGI_FORMAT_R16G16_FLOAT);
-
   const uint32_t full_w = g.x.full, full_h = g.y.full;
   float gx = -1.0f, gy = -1.0f;
   if (GazeLatest(&gx, &gy)) { gx *= (float)full_w; gy *= (float)full_h; }
@@ -591,13 +652,159 @@ inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, 
   uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
   uav.UAV.pResource = frame_res;
   cmd->ResourceBarrier(1, &uav);   // after the resolve's writes
-  cmd->SetDescriptorHeaps(1, &g.heap);
-  cmd->SetComputeRootSignature(g.root_sig);
-  cmd->SetPipelineState(g.debug_pso);
-  cmd->SetComputeRootDescriptorTable(0, Gpu(base + 0));
-  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 4));
-  cmd->SetComputeRoot32BitConstants(2, kConstants, c, 0);
+  Bind(device, cmd, g.debug_pso, frame, kDebug,
+       {{nullptr, kRgba}, {nullptr, kR32}, {nullptr, kRg16}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{frame_res, DXGI_FORMAT_UNKNOWN}, {nullptr, kR32}, {nullptr, kRg16}}, c);
   cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
+  device->Release();
+}
+
+// --- split mode ----------------------------------------------------------
+
+inline bool EnsureLowTextures(ID3D12Device* device, uint32_t w, uint32_t h) {
+  if (g.low[0] != nullptr && g.low_w == w && g.low_h == h) return true;
+  for (auto*& r : g.low) Bury(r);
+  D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_DEFAULT};
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = w;
+  desc.Height = h;
+  desc.DepthOrArraySize = desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Format = kRgba;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  for (auto*& r : g.low)
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                               IID_PPV_ARGS(&r))))
+      return false;
+  g.low_w = w;
+  g.low_h = h;
+  return true;
+}
+
+// The split constants: the usual header, then the crop, the low-res frame and the blur.
+inline void SplitConstants(uint32_t* c, const SplitLayout& l, uint32_t full_w, uint32_t full_h,
+                           uint32_t render_w, uint32_t render_h, float mv_x, float mv_y) {
+  const float feather_cap = 0.5f * (float)(l.crop_w < l.crop_h ? l.crop_w : l.crop_h);
+  float feather = settings.falloff * (float)full_h;
+  feather = feather > feather_cap ? feather_cap : feather;
+  c[0] = full_w; c[1] = full_h; c[2] = l.work_w; c[3] = l.work_h;
+  c[4] = render_w; c[5] = render_h;
+  std::memcpy(&c[6], &mv_x, 4);
+  std::memcpy(&c[7], &mv_y, 4);
+  c[15] = g.crop_x; c[16] = g.crop_y;
+  const int prev[2] = {g.prev_crop_x, g.prev_crop_y};
+  std::memcpy(&c[17], prev, 8);
+  c[19] = l.crop_w; c[20] = l.crop_h;
+  c[21] = l.low_x; c[22] = l.low_w; c[23] = l.low_h;
+  std::memcpy(&c[24], &feather, 4);
+  c[25] = 0;
+  std::memcpy(&c[26], &settings.grade_blur, 4);
+}
+
+// Split mode's Squeeze: place the crop at the gaze and fill the atlas. Same contract as Squeeze
+// (leaves proxy_s, depth_s and motion_s NON_PIXEL_SHADER_RESOURCE; g.x.work/g.y.work = the atlas).
+inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D12Resource* depth,
+                         ID3D12Resource* motion, uint32_t full_w, uint32_t full_h, uint32_t render_w,
+                         uint32_t render_h, float mv_scale_x, float mv_scale_y, uint32_t frame) {
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
+  const SplitLayout l = SplitSize(full_w, full_h);
+
+  TickGraves();
+  UpdateCentre(full_w, full_h);
+  // The crop's motion vectors carry its move, so a jump needs no reset: what enters the crop is
+  // simply new to it.
+  g.reset = false;
+  auto origin = [](float centre, uint32_t size, uint32_t full) {
+    const long o = std::lround(centre - 0.5f * (float)size);
+    return (uint32_t)(o < 0 ? 0 : (o > (long)(full - size) ? (long)(full - size) : o));
+  };
+  g.crop_x = origin(g.centre_x, l.crop_w, full_w);
+  g.crop_y = origin(g.centre_y, l.crop_h, full_h);
+  if (g.prev_crop_x < 0 || g.x.full != full_w || g.y.full != full_h || g.x.work != l.work_w ||
+      g.y.work != l.work_h) {
+    g.prev_crop_x = (int)g.crop_x;   // first frame, or a new layout: start the history over
+    g.prev_crop_y = (int)g.crop_y;
+    g.reset = true;
+  }
+  // The squeeze's tables do not describe this mapping: drop them, so going back rebuilds them.
+  g.x = {};
+  g.y = {};
+  g.x.full = full_w;
+  g.y.full = full_h;
+  g.x.work = l.work_w;
+  g.y.work = l.work_h;
+
+  if (!Init(device) || !EnsureLut(device, 16) || !EnsureTextures(device, l.work_w, l.work_h) ||
+      !EnsureLowTextures(device, l.low_w, l.low_h)) {
+    device->Release();
+    return false;
+  }
+
+  uint32_t c[kConstants] = {};
+  SplitConstants(c, l, full_w, full_h, render_w, render_h, mv_scale_x, mv_scale_y);
+  Bind(device, cmd, g.split_pso[0], frame, kSplitSqueeze,
+       {{proxy, kRgba}, {depth, kR32}, {motion, kRg16}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{g.proxy_s, kRgba}, {g.depth_s, kR32}, {g.motion_s, kRg16}}, c);
+  cmd->Dispatch((l.work_w + 7) / 8, (l.work_h + 7) / 8, 1);
+
+  for (ID3D12Resource* t : {g.proxy_s, g.depth_s, g.motion_s})
+    Barrier(cmd, t, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  g.prev_crop_x = (int)g.crop_x;   // for the next frame's motion vectors
+  g.prev_crop_y = (int)g.crop_y;
+  device->Release();
+  return true;
+}
+
+// Split mode's Expand: the tone transfer and the blend into the full-size answer (UNORDERED_ACCESS,
+// as the resolve expects it). `proxy` is the model's full-size input, NON_PIXEL_SHADER_RESOURCE.
+inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, ID3D12Resource* proxy,
+                        uint32_t frame) {
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+  const uint32_t full_w = g.x.full, full_h = g.y.full;
+  const SplitLayout l = SplitSize(full_w, full_h);
+  constexpr auto kUav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  constexpr auto kSrv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+  // SplitSqueeze already advanced prev_crop to this frame's crop; the passes below only need
+  // the current one.
+  uint32_t c[kConstants] = {};
+  SplitConstants(c, l, full_w, full_h, 1, 1, 0.0f, 0.0f);
+  const uint32_t gx = (l.low_w + 7) / 8, gy = (l.low_h + 7) / 8;
+  ID3D12Resource* const* low = g.low;
+
+  Barrier(cmd, g.answer_s, kUav, kSrv);
+  Bind(device, cmd, g.split_pso[1], frame, kSplitLow,
+       {{g.answer_s, kRgba}, {proxy, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{low[0], kRgba}, {low[1], kRgba}, {low[2], kRgba}}, c);
+  cmd->Dispatch(gx, gy, 1);
+
+  for (int i = 0; i < 3; ++i) Barrier(cmd, low[i], kUav, kSrv);
+  c[25] = 0;
+  Bind(device, cmd, g.split_pso[2], frame, kSplitBlurH,
+       {{low[0], kRgba}, {low[1], kRgba}, {low[2], kRgba}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{low[3], kRgba}, {low[4], kRgba}, {low[5], kRgba}}, c);
+  cmd->Dispatch(gx, gy, 1);
+
+  for (int i = 3; i < 6; ++i) Barrier(cmd, low[i], kUav, kSrv);
+  c[25] = 1;
+  Bind(device, cmd, g.split_pso[2], frame, kSplitBlurV,
+       {{low[3], kRgba}, {low[4], kRgba}, {low[5], kRgba}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{low[6], kRgba}, {low[7], kRgba}, {nullptr, kRgba}}, c);
+  cmd->Dispatch(gx, gy, 1);
+
+  for (int i = 6; i < 8; ++i) Barrier(cmd, low[i], kUav, kSrv);
+  Bind(device, cmd, g.split_pso[3], frame, kSplitExpand,
+       {{g.answer_s, kRgba}, {proxy, kRgba}, {low[6], kRgba}, {low[7], kRgba}, {nullptr, kRgba}},
+       {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c);
+  cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
+
+  for (int i = 0; i < 8; ++i) Barrier(cmd, low[i], kSrv, kUav);
+  Barrier(cmd, g.answer_s, kSrv, kUav);
+  for (ID3D12Resource* t : {g.proxy_s, g.depth_s, g.motion_s}) Barrier(cmd, t, kSrv, kUav);
   device->Release();
 }
 

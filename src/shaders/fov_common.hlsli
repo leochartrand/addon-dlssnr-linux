@@ -7,6 +7,10 @@
 //   inv[u]  full-resolution coordinate of working pixel centre u
 //
 // with the X table followed by the Y table in each block.
+//
+// Split foveation uses no tables: the model's working texture is an atlas of a full-resolution
+// crop around the gaze (left, at the origin) and the whole frame at low resolution (from g_low_x),
+// and the answer's broad tone is taken from the low-resolution half everywhere (fov_split_*).
 
 StructuredBuffer<float> Lut : register(t3);
 SamplerState Linear : register(s0);
@@ -28,6 +32,18 @@ cbuffer FovConstants : register(b0)
     float g_centre_y;  // (gaze x < 0 = no gaze)
     float g_gaze_x;
     float g_gaze_y;
+    uint g_crop_x;     // split: the crop's origin in full pixels, this frame and the last
+    uint g_crop_y;
+    int g_prev_crop_x;
+    int g_prev_crop_y;
+    uint g_crop_w;
+    uint g_crop_h;
+    uint g_low_x;      // split: where the low-resolution frame starts in the atlas, and its size
+    uint g_low_w;
+    uint g_low_h;
+    float g_feather;   // split: blend from the crop's edge inwards, full pixels
+    uint g_blur_axis;  // split blur: 0 horizontal, 1 vertical (and form the gains)
+    float g_sigma;     // split blur: Gaussian sigma, low-resolution pixels
 };
 
 // Continuous lookup into a per-pixel-centre table: pos is a coordinate in that table's space
@@ -48,4 +64,16 @@ float2 Forward(uint base, float2 full_pos)
 float2 Inverse(uint2 work_px)
 {
     return float2(Lut[g_inv + work_px.x], Lut[g_inv + g_work_w + work_px.y]);
+}
+
+// Mean of a full-resolution texture over a scale-sized footprint around a full-resolution
+// position: four bilinear taps, each the mean of a 2x2 block (exact for a 4x scale).
+float4 BoxSample(Texture2D<float4> src, float2 full, float2 scale)
+{
+    float2 inv = 1.0 / float2(g_full_w, g_full_h);
+    float2 o = scale * 0.25;
+    return 0.25 * (src.SampleLevel(Linear, (full + float2(-o.x, -o.y)) * inv, 0) +
+                   src.SampleLevel(Linear, (full + float2(o.x, -o.y)) * inv, 0) +
+                   src.SampleLevel(Linear, (full + float2(-o.x, o.y)) * inv, 0) +
+                   src.SampleLevel(Linear, (full + float2(o.x, o.y)) * inv, 0));
 }

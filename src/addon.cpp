@@ -132,6 +132,9 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
   reshade::get_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
   reshade::get_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
+  reshade::get_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
+  reshade::get_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
+  reshade::get_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
 
   // A hand-edited ini must not push values past what the overlay allows.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -151,6 +154,8 @@ void LoadSettings() {
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
   f.jump_reset = Clamp(f.jump_reset, 0.02f, 2.0f);
+  f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
+  f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
 }
 
 void SaveSettings() {
@@ -176,6 +181,9 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
   reshade::set_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
   reshade::set_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
+  reshade::set_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
+  reshade::set_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
+  reshade::set_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
 }
 
 // --- live settings from another process ----------------------------------
@@ -239,6 +247,9 @@ void PollLiveSettings() {
   f.gaze_source = LiveInt(path, "GazeSource", f.gaze_source);
   f.gaze_port = LiveInt(path, "GazePort", f.gaze_port);
   f.gaze_smooth_ms = LiveFloat(path, "GazeSmoothMs", f.gaze_smooth_ms);
+  f.split = LiveInt(path, "FoveaSplit", f.split ? 1 : 0) != 0;
+  f.global_scale = LiveFloat(path, "GlobalScale", f.global_scale);
+  f.grade_blur = LiveFloat(path, "GradeBlur", f.grade_blur);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
@@ -259,6 +270,8 @@ void PollLiveSettings() {
   if (f.gaze_source < 0 || f.gaze_source > 1) f.gaze_source = 0;
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
+  f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
+  f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
 
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
   if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
@@ -351,6 +364,11 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   changed |= SliderWithReset("Fovea height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
   changed |= SliderWithReset("Falloff", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
   changed |= SliderWithReset("Edge resolution", &f.edge, 0.25f, 1.0f, "%.2f", 0.50f);
+  changed |= ImGui::Checkbox("Split: full-res crop + low-res frame for the tone", &f.split);
+  if (f.split) {
+    changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
+    changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 6.0f);
+  }
   changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
   if (f.gaze_source == 1) {
     changed |= ImGui::InputInt("Gaze UDP port", &f.gaze_port);
