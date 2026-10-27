@@ -120,6 +120,12 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GlobalIntensity", s.local_tone);
   reshade::get_config_value(nullptr, kConfigSection, "Preset", s.preset);
   reshade::get_config_value(nullptr, kConfigSection, "Style", s.style);
+  reshade::get_config_value(nullptr, kConfigSection, "MaskBlendMode", s.mask_blend_mode);
+  reshade::get_config_value(nullptr, kConfigSection, "UICorrection", s.ui_correction);
+  reshade::get_config_value(nullptr, kConfigSection, "UseAutoMask", s.auto_mask);
+  reshade::get_config_value(nullptr, kConfigSection, "SkinStructureStrength", s.skin_structure);
+  reshade::get_config_value(nullptr, kConfigSection, "GlobalToneStrength", s.global_tone);
+  reshade::get_config_value(nullptr, kConfigSection, "ScalingRatio", s.scaling_ratio);
   reshade::get_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   auto& f = fov::settings;
@@ -171,6 +177,12 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GlobalIntensity", s.local_tone);
   reshade::set_config_value(nullptr, kConfigSection, "Preset", s.preset);
   reshade::set_config_value(nullptr, kConfigSection, "Style", s.style);
+  reshade::set_config_value(nullptr, kConfigSection, "MaskBlendMode", s.mask_blend_mode);
+  reshade::set_config_value(nullptr, kConfigSection, "UICorrection", s.ui_correction);
+  reshade::set_config_value(nullptr, kConfigSection, "UseAutoMask", s.auto_mask);
+  reshade::set_config_value(nullptr, kConfigSection, "SkinStructureStrength", s.skin_structure);
+  reshade::set_config_value(nullptr, kConfigSection, "GlobalToneStrength", s.global_tone);
+  reshade::set_config_value(nullptr, kConfigSection, "ScalingRatio", s.scaling_ratio);
   reshade::set_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   const auto& f = fov::settings;
@@ -229,6 +241,8 @@ void PollLiveSettings() {
   auto& f = fov::settings;
   const float old_model[3] = {s.intensity, s.local_structure, s.local_tone};
   const int old_preset = s.preset, old_style = s.style;
+  const int old_ints[3] = {s.mask_blend_mode, s.ui_correction, s.auto_mask};
+  const float old_floats[3] = {s.skin_structure, s.global_tone, s.scaling_ratio};
 
   nr_runner::SetEnabled(LiveInt(path, "Enabled", nr_runner::IsEnabled() ? 1 : 0) != 0);
   s.debug_view = LiveInt(path, "DebugView", s.debug_view);
@@ -241,6 +255,12 @@ void PollLiveSettings() {
   s.local_tone = LiveFloat(path, "GlobalIntensity", s.local_tone);
   s.preset = LiveInt(path, "Preset", s.preset);
   s.style = LiveInt(path, "Style", s.style);
+  s.mask_blend_mode = LiveInt(path, "MaskBlendMode", s.mask_blend_mode);
+  s.ui_correction = LiveInt(path, "UICorrection", s.ui_correction);
+  s.auto_mask = LiveInt(path, "UseAutoMask", s.auto_mask);
+  s.skin_structure = LiveFloat(path, "SkinStructureStrength", s.skin_structure);
+  s.global_tone = LiveFloat(path, "GlobalToneStrength", s.global_tone);
+  s.scaling_ratio = LiveFloat(path, "ScalingRatio", s.scaling_ratio);
   s.before_upscale = LiveInt(path, "BeforeUpscale", s.before_upscale ? 1 : 0) != 0;
   f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
   f.width = LiveFloat(path, "FoveaWidth", f.width);
@@ -280,7 +300,9 @@ void PollLiveSettings() {
 
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
   if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
-      s.local_tone != old_model[2] || s.preset != old_preset || s.style != old_style)
+      s.local_tone != old_model[2] || s.preset != old_preset || s.style != old_style ||
+      s.mask_blend_mode != old_ints[0] || s.ui_correction != old_ints[1] || s.auto_mask != old_ints[2] ||
+      s.skin_structure != old_floats[0] || s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2])
     nr_runner::ApplyModelSettings();
   SaveSettings();
   ngx_probe::Log("nr-fwd: live settings applied from dlssnr-linux-live.ini");

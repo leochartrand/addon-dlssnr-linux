@@ -157,6 +157,15 @@ struct State {
   float local_tone = 1.0f;
   int preset = 0;
   int style = 0;
+  // Further model parameters, for experiments (-1 = leave unset, the model's own default):
+  // MaskBlendMode 0-3 (NVIDIA's default 1), UICorrection and UseAutoMask 0/1 (we used to force 1),
+  // SkinStructureStrength (we used to send -1), GlobalToneStrength, ScalingRatio (0 = unset).
+  int mask_blend_mode = -1;
+  int ui_correction = 1;
+  int auto_mask = 1;
+  float skin_structure = -1.0f;
+  float global_tone = -1.0f;
+  float scaling_ratio = 0.0f;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -540,8 +549,12 @@ inline void WriteTuning(void* p) {
   SetUInt(p, "DLSSNR.Style", (unsigned)s.style);
   SetFloat(p, "DLSSNR.LocalStructureStrength", s.local_structure);
   SetFloat(p, "DLSSNR.LocalToneStrength", s.local_tone);
-  SetFloat(p, "DLSSNR.SkinStructureStrength", -1.0f);
-  SetUInt(p, "DLSSNR.UseAutoMask", 1u);
+  SetFloat(p, "DLSSNR.SkinStructureStrength", s.skin_structure);
+  if (s.auto_mask >= 0) SetUInt(p, "DLSSNR.UseAutoMask", (unsigned)s.auto_mask);
+  if (s.ui_correction >= 0) SetUInt(p, "DLSSNR.UICorrection", (unsigned)s.ui_correction);
+  if (s.mask_blend_mode >= 0) SetUInt(p, "DLSSNR.MaskBlendMode", (unsigned)s.mask_blend_mode);
+  if (s.global_tone >= 0.0f) SetFloat(p, "DLSSNR.GlobalToneStrength", s.global_tone);
+  if (s.scaling_ratio > 0.0f) SetFloat(p, "DLSSNR.ScalingRatio", s.scaling_ratio);
 }
 
 // Called by the overlay after the create-time model settings changed: the model reads them only
@@ -580,7 +593,6 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
     SetUInt(p, "CreationNodeMask", 1u);
     SetUInt(p, "VisibilityNodeMask", 1u);
     SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)s.preset);
-    SetUInt(p, "DLSSNR.UICorrection", 1u);
     WriteTuning(p);
     int create_result = 0;
     void* f = s.create(cmd, s.caps, &create_result);
