@@ -126,7 +126,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "SkinStructureStrength", s.skin_structure);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalToneStrength", s.global_tone);
   reshade::get_config_value(nullptr, kConfigSection, "ScalingRatio", s.scaling_ratio);
-  reshade::get_config_value(nullptr, kConfigSection, "SplitCropPreset", s.split_crop_preset);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalPreset", s.split_global_preset);
   reshade::get_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   auto& f = fov::settings;
@@ -184,7 +184,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "SkinStructureStrength", s.skin_structure);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalToneStrength", s.global_tone);
   reshade::set_config_value(nullptr, kConfigSection, "ScalingRatio", s.scaling_ratio);
-  reshade::set_config_value(nullptr, kConfigSection, "SplitCropPreset", s.split_crop_preset);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalPreset", s.split_global_preset);
   reshade::set_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   const auto& f = fov::settings;
@@ -243,7 +243,7 @@ void PollLiveSettings() {
   auto& f = fov::settings;
   const float old_model[3] = {s.intensity, s.local_structure, s.local_tone};
   const int old_preset = s.preset, old_style = s.style;
-  const int old_ints[4] = {s.mask_blend_mode, s.ui_correction, s.auto_mask, s.split_crop_preset};
+  const int old_ints[4] = {s.mask_blend_mode, s.ui_correction, s.auto_mask, s.split_global_preset};
   const float old_floats[3] = {s.skin_structure, s.global_tone, s.scaling_ratio};
 
   nr_runner::SetEnabled(LiveInt(path, "Enabled", nr_runner::IsEnabled() ? 1 : 0) != 0);
@@ -263,7 +263,7 @@ void PollLiveSettings() {
   s.skin_structure = LiveFloat(path, "SkinStructureStrength", s.skin_structure);
   s.global_tone = LiveFloat(path, "GlobalToneStrength", s.global_tone);
   s.scaling_ratio = LiveFloat(path, "ScalingRatio", s.scaling_ratio);
-  s.split_crop_preset = LiveInt(path, "SplitCropPreset", s.split_crop_preset);
+  s.split_global_preset = LiveInt(path, "SplitGlobalPreset", s.split_global_preset);
   s.before_upscale = LiveInt(path, "BeforeUpscale", s.before_upscale ? 1 : 0) != 0;
   f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
   f.width = LiveFloat(path, "FoveaWidth", f.width);
@@ -304,7 +304,7 @@ void PollLiveSettings() {
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
   if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
       s.local_tone != old_model[2] || s.preset != old_preset || s.style != old_style ||
-      s.mask_blend_mode != old_ints[0] || s.ui_correction != old_ints[1] || s.auto_mask != old_ints[2] || s.split_crop_preset != old_ints[3] ||
+      s.mask_blend_mode != old_ints[0] || s.ui_correction != old_ints[1] || s.auto_mask != old_ints[2] || s.split_global_preset != old_ints[3] ||
       s.skin_structure != old_floats[0] || s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2])
     nr_runner::ApplyModelSettings();
   SaveSettings();

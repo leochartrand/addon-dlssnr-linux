@@ -166,10 +166,10 @@ struct State {
   float skin_structure = -1.0f;
   float global_tone = -1.0f;
   float scaling_ratio = 0.0f;
-  // Split in two calls: the crop's network, when it should differ from `preset` (-1 = the same).
-  // Lets the low-res pass, which sets the look everywhere, run a network that holds up at small
-  // sizes while the full-res crop runs a cheaper one.
-  int split_crop_preset = -1;
+  // Split in two calls: the low-res pass's network (-1 = the same as `preset`). That pass sets the
+  // look everywhere, and the Small FP8 network fries at its size while Legacy (1) holds up, so it
+  // defaults to Legacy; the full-res crop runs `preset`.
+  int split_global_preset = 1;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -199,8 +199,10 @@ inline State s;
 
 // The size of the picture the pass works on, for the current mode. Before the upscale only means
 // something when DLSS-SR really upscales; at DLAA (input = output size) both modes are the same.
+// Split foveation always works on the output: its crop is there for the display's full resolution.
 inline void UpdateFrameSize() {
-  const bool before = s.before_upscale && s.render_w != 0 && s.render_h != 0 &&
+  const bool split = fov::settings.enabled && fov::settings.split;
+  const bool before = s.before_upscale && !split && s.render_w != 0 && s.render_h != 0 &&
                       (s.render_w != s.out_w || s.render_h != s.out_h);
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
@@ -607,8 +609,10 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   const int calls = WantedCalls();
   if (calls == 2) {
     const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
-    s.feature = create(l.crop_w, l.crop_h, s.split_crop_preset >= 0 ? s.split_crop_preset : s.preset);
-    s.feature2 = s.feature != nullptr ? create(l.low_w, l.low_h, s.preset) : nullptr;
+    s.feature = create(l.crop_w, l.crop_h, s.preset);
+    s.feature2 = s.feature != nullptr
+                     ? create(l.low_w, l.low_h, s.split_global_preset >= 0 ? s.split_global_preset : s.preset)
+                     : nullptr;
     if (s.feature2 == nullptr) {
       if (s.feature != nullptr) Bury(nullptr, s.feature);
       s.feature = nullptr;
