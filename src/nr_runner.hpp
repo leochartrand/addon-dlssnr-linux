@@ -39,6 +39,7 @@
 
 #include "nr_compose.hpp"
 #include "fov.hpp"
+#include "diag.hpp"
 
 #pragma comment(lib, "bcrypt")   // SHA-256 of the model DLL
 #pragma comment(lib, "version")  // its file-version resource
@@ -596,12 +597,17 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   float wp = (s.wp_ema > 0.0f) ? s.wp_ema : 1.0f;
   wp = (wp < 0.01f ? 0.01f : (wp > 1000.0f ? 1000.0f : wp)) * s.wp_scale;
 
+  diag::Poll(s.eval_count, s.game_dir, ngx_probe::Log);
+  diag::Begin(cmd, s.eval_count, ngx_probe::Log);
+
   // Copy the original aside, encode the display-referred proxy, record the measurement.
   if (!nr_compose::RecordPre(cmd, color, s.color_copy, s.proxy, s.out_w, s.out_h, s.eval_count,
                              wp)) {
     GiveUp("compose pipeline initialisation failed");
     return;
   }
+
+  diag::Mark(cmd, diag::kEncode);
 
   float mv_scale_x = 1.0f, mv_scale_y = 1.0f;
   game_params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mv_scale_x);
@@ -645,6 +651,8 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     if (fov::g.reset) reset = 1;
     fov::g.reset = false;
   }
+
+  diag::Mark(cmd, diag::kSqueeze);
 
   void* p = s.caps;
   SetResource(p, "DLSSNR.Color", in_color);
@@ -698,7 +706,9 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     return;
   }
   s.fail_streak = 0;
+  diag::Mark(cmd, diag::kModel);
   if (foveated) fov::Expand(cmd, s.output, frame);
+  diag::Mark(cmd, diag::kExpand);
 
   // Anchor the model's answer to the original and write the blend into the game's output, which
   // its post-processing reads next.
@@ -706,6 +716,18 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
                          (uint32_t)s.debug_view);
   if (foveated && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
+  diag::Mark(cmd, diag::kResolve);
+  diag::End(cmd);
+
+  char info[384];
+  std::snprintf(info, sizeof(info),
+                "foveated=%d\nwork=%ux%u\nfovea_w=%.3f\nfovea_h=%.3f\nfalloff=%.3f\nedge=%.3f\n"
+                "centre_x=%.1f\ncentre_y=%.1f\ncolour=%.2f\nguard=%.2f\nwhite_point=%.4f\n",
+                foveated ? 1 : 0, s.feature_w, s.feature_h, fov::settings.width,
+                fov::settings.height, fov::settings.falloff, fov::settings.edge,
+                foveated ? fov::g.centre_x : s.out_w * 0.5f, foveated ? fov::g.centre_y : s.out_h * 0.5f,
+                s.colour_strength, s.max_ratio, wp);
+  diag::Capture(cmd, s.color_copy, color, s.eval_count, info, ngx_probe::Log);
 }
 
 // Called after every successful game DLSS-SR evaluate, on the game's own command list.

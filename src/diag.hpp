@@ -1,0 +1,242 @@
+// Diagnostics for the pass: GPU timestamps around each stage, logged as averages, and a one-shot
+// dump of the frame (the original and the final picture) for comparing settings offline.
+//
+//   timers: start | encode | squeeze | model | expand | resolve, every frame into a ring of
+//           readback slots; a slot is read back kRing frames later, when it has surely executed
+//   dump:   DumpFrame=<id> in the live ini copies both textures to readback buffers on the next
+//           evaluate and writes dlssnr-dump-<id>-{orig,final}.raw (+ .txt header) beside the exe
+//           kRing frames later
+
+#pragma once
+
+#include <windows.h>
+
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#include <utility>
+
+#include <d3d12.h>
+
+namespace diag {
+
+constexpr uint32_t kRing = 16;   // frames a timestamp slot or a dump waits before it is read back
+enum Stamp : uint32_t { kStart, kEncode, kSqueeze, kModel, kExpand, kResolve, kStamps };
+constexpr const char* kStageNames[kStamps - 1] = {"encode", "squeeze", "model", "expand", "resolve"};
+constexpr uint32_t kReportEvery = 300;
+
+// Ticks per second of the queue's timestamps, from the present hook (0 until known).
+inline std::atomic<uint64_t> timestamp_freq{0};
+
+// Set from the live ini; a new id asks for one dump.
+inline std::atomic<int> dump_requested{0};
+
+using LogFn = void (*)(const char*);
+
+struct Timers {
+  ID3D12QueryHeap* heap = nullptr;
+  ID3D12Resource* readback = nullptr;
+  bool armed[kRing] = {};     // the slot's queries were all recorded and resolved
+  bool open = false;          // Begin ran this frame and End has not
+  uint32_t slot = 0;
+  double sum[kStamps - 1] = {};
+  double sum_total = 0.0;
+  uint32_t count = 0;
+  LARGE_INTEGER last_begin = {};
+  double sum_interval = 0.0;
+  uint32_t intervals = 0;
+};
+
+inline Timers t;
+
+inline bool CreateReadback(ID3D12Device* device, UINT64 bytes, ID3D12Resource** out) {
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_READBACK;
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  desc.Width = bytes;
+  desc.Height = 1;
+  desc.DepthOrArraySize = 1;
+  desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  return SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                   D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                   IID_PPV_ARGS(out)));
+}
+
+// Fold the slot recorded kRing frames ago into the averages, then start this frame's queries.
+inline void Begin(ID3D12GraphicsCommandList* cmd, uint32_t frame, LogFn log) {
+  t.open = false;
+  if (t.heap == nullptr) {
+    ID3D12Device* device = nullptr;
+    if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+    D3D12_QUERY_HEAP_DESC qd = {};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = kRing * kStamps;
+    const bool ok = SUCCEEDED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&t.heap))) &&
+                    CreateReadback(device, sizeof(uint64_t) * kRing * kStamps, &t.readback);
+    device->Release();
+    if (!ok) {
+      if (t.heap != nullptr) t.heap->Release();
+      t.heap = nullptr;
+      return;
+    }
+  }
+
+  LARGE_INTEGER now, qpf;
+  QueryPerformanceCounter(&now);
+  QueryPerformanceFrequency(&qpf);
+  if (t.last_begin.QuadPart != 0) {
+    t.sum_interval += double(now.QuadPart - t.last_begin.QuadPart) * 1000.0 / double(qpf.QuadPart);
+    ++t.intervals;
+  }
+  t.last_begin = now;
+
+  t.slot = frame % kRing;
+  const uint64_t freq = timestamp_freq.load(std::memory_order_relaxed);
+  if (t.armed[t.slot] && freq != 0) {
+    D3D12_RANGE range = {t.slot * kStamps * sizeof(uint64_t), (t.slot + 1) * kStamps * sizeof(uint64_t)};
+    void* p = nullptr;
+    if (SUCCEEDED(t.readback->Map(0, &range, &p))) {
+      const uint64_t* ts = (const uint64_t*)((const char*)p + range.Begin);
+      bool sane = true;
+      for (uint32_t i = 1; i < kStamps; ++i) sane &= ts[i] >= ts[i - 1];
+      if (sane) {
+        for (uint32_t i = 1; i < kStamps; ++i) t.sum[i - 1] += double(ts[i] - ts[i - 1]) * 1000.0 / double(freq);
+        t.sum_total += double(ts[kStamps - 1] - ts[0]) * 1000.0 / double(freq);
+        ++t.count;
+      }
+      D3D12_RANGE none = {0, 0};
+      t.readback->Unmap(0, &none);
+    }
+  }
+  t.armed[t.slot] = false;
+
+  if (t.count >= kReportEvery) {
+    char line[512];
+    int n = std::snprintf(line, sizeof(line), "timing: GPU ms/frame");
+    for (uint32_t i = 0; i < kStamps - 1; ++i)
+      n += std::snprintf(line + n, sizeof(line) - n, " %s %.2f", kStageNames[i], t.sum[i] / t.count);
+    std::snprintf(line + n, sizeof(line) - n, " | pass %.2f | evaluate interval %.2f ms (%.1f fps)",
+                  t.sum_total / t.count, t.intervals ? t.sum_interval / t.intervals : 0.0,
+                  t.intervals ? 1000.0 * t.intervals / t.sum_interval : 0.0);
+    log(line);
+    for (double& v : t.sum) v = 0.0;
+    t.sum_total = t.sum_interval = 0.0;
+    t.count = t.intervals = 0;
+  }
+
+  cmd->EndQuery(t.heap, D3D12_QUERY_TYPE_TIMESTAMP, t.slot * kStamps + kStart);
+  t.open = true;
+}
+
+inline void Mark(ID3D12GraphicsCommandList* cmd, Stamp stamp) {
+  if (t.open) cmd->EndQuery(t.heap, D3D12_QUERY_TYPE_TIMESTAMP, t.slot * kStamps + stamp);
+}
+
+// After the last stage: resolve this frame's stamps into its readback slot.
+inline void End(ID3D12GraphicsCommandList* cmd) {
+  if (!t.open) return;
+  cmd->ResolveQueryData(t.heap, D3D12_QUERY_TYPE_TIMESTAMP, t.slot * kStamps, kStamps, t.readback,
+                        t.slot * kStamps * sizeof(uint64_t));
+  t.armed[t.slot] = true;
+  t.open = false;
+}
+
+// --- frame dump -----------------------------------------------------------
+
+struct Dump {
+  int done = 0;               // last id written
+  int pending = 0;            // id being copied, 0 if none
+  uint32_t ready_at = 0;      // frame from which the copies have surely executed
+  ID3D12Resource* rb[2] = {};
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+  UINT64 bytes = 0;
+  char info[512] = {};
+};
+
+inline Dump d;
+
+inline void CopyOut(ID3D12GraphicsCommandList* cmd, ID3D12Resource* tex, ID3D12Resource* rb) {
+  D3D12_RESOURCE_BARRIER b = {};
+  b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  b.Transition.pResource = tex;
+  b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+  cmd->ResourceBarrier(1, &b);
+  D3D12_TEXTURE_COPY_LOCATION dst = {};
+  dst.pResource = rb;
+  dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint = d.fp;
+  D3D12_TEXTURE_COPY_LOCATION src = {};
+  src.pResource = tex;
+  src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  src.SubresourceIndex = 0;
+  cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+  cmd->ResourceBarrier(1, &b);
+}
+
+// At the end of the pass, with both textures back in UNORDERED_ACCESS. `info` describes the
+// settings in effect, for the header.
+inline void Capture(ID3D12GraphicsCommandList* cmd, ID3D12Resource* original, ID3D12Resource* final_,
+                    uint32_t frame, const char* info, LogFn log) {
+  const int want = dump_requested.load(std::memory_order_relaxed);
+  if (want == d.done || d.pending != 0) return;
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+  const D3D12_RESOURCE_DESC desc = final_->GetDesc();
+  device->GetCopyableFootprints(&desc, 0, 1, 0, &d.fp, nullptr, nullptr, &d.bytes);
+  bool ok = CreateReadback(device, d.bytes, &d.rb[0]) && CreateReadback(device, d.bytes, &d.rb[1]);
+  device->Release();
+  if (!ok || original->GetDesc().Format != desc.Format) {
+    for (auto*& r : d.rb) if (r != nullptr) { r->Release(); r = nullptr; }
+    d.done = want;
+    log("dump: could not create the readback buffers");
+    return;
+  }
+  CopyOut(cmd, original, d.rb[0]);
+  CopyOut(cmd, final_, d.rb[1]);
+  std::snprintf(d.info, sizeof(d.info), "width=%llu\nheight=%u\nformat=%u\nrow_pitch=%u\n%s",
+                (unsigned long long)desc.Width, desc.Height, (unsigned)desc.Format,
+                d.fp.Footprint.RowPitch, info);
+  d.pending = want;
+  d.ready_at = frame + kRing;
+}
+
+// Every evaluate: once a dump's copies have executed, write the files beside the exe.
+inline void Poll(uint32_t frame, const wchar_t* dir, LogFn log) {
+  if (d.pending == 0 || frame < d.ready_at) return;
+  const char* names[2] = {"orig", "final"};
+  for (int i = 0; i < 2; ++i) {
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, L"%s\\dlssnr-dump-%d-%S.raw", dir, d.pending, names[i]);
+    void* p = nullptr;
+    D3D12_RANGE range = {0, (SIZE_T)d.bytes};
+    if (SUCCEEDED(d.rb[i]->Map(0, &range, &p))) {
+      if (FILE* f = _wfopen(path, L"wb")) {
+        fwrite(p, 1, (size_t)d.bytes, f);
+        fclose(f);
+      }
+      D3D12_RANGE none = {0, 0};
+      d.rb[i]->Unmap(0, &none);
+    }
+    d.rb[i]->Release();
+    d.rb[i] = nullptr;
+  }
+  wchar_t path[MAX_PATH];
+  swprintf_s(path, L"%s\\dlssnr-dump-%d.txt", dir, d.pending);
+  if (FILE* f = _wfopen(path, L"wb")) {
+    fputs(d.info, f);
+    fclose(f);
+  }
+  char line[96];
+  std::snprintf(line, sizeof(line), "dump: frame %d written", d.pending);
+  log(line);
+  d.done = d.pending;
+  d.pending = 0;
+}
+
+}  // namespace diag

@@ -75,7 +75,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 // pointers still works.
 void PollLiveSettings();  // below, with the rest of the settings code
 
-void OnPresent(reshade::api::command_queue*, reshade::api::swapchain*,
+void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain*,
                const reshade::api::rect*, const reshade::api::rect*,
                uint32_t, const reshade::api::rect*) {
   ngx_probe::TryInstall();
@@ -85,6 +85,14 @@ void OnPresent(reshade::api::command_queue*, reshade::api::swapchain*,
   const bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
   if (f10_down && !f10_was_down) nr_runner::SetEnabled(!nr_runner::IsEnabled());
   f10_was_down = f10_down;
+
+  // The pass's GPU timers need the queue's timestamp rate; any D3D12 queue on the device has it.
+  if (diag::timestamp_freq.load(std::memory_order_relaxed) == 0 && queue != nullptr &&
+      queue->get_device()->get_api() == reshade::api::device_api::d3d12) {
+    UINT64 freq = 0;
+    auto* native = reinterpret_cast<ID3D12CommandQueue*>(queue->get_native());
+    if (native != nullptr && SUCCEEDED(native->GetTimestampFrequency(&freq))) diag::timestamp_freq = freq;
+  }
 
   PollLiveSettings();
 }
@@ -228,6 +236,7 @@ void PollLiveSettings() {
   f.gaze_source = LiveInt(path, "GazeSource", f.gaze_source);
   f.gaze_port = LiveInt(path, "GazePort", f.gaze_port);
   f.gaze_smooth_ms = LiveFloat(path, "GazeSmoothMs", f.gaze_smooth_ms);
+  diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
