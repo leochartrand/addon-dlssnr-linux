@@ -239,7 +239,7 @@ void PollLiveSettings() {
   s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
-  if (s.debug_view < 0 || s.debug_view > 3) s.debug_view = 0;
+  if (s.debug_view < 0 || s.debug_view > 4) s.debug_view = 0;
   f.width = Clamp(f.width, 0.05f, 1.0f);
   f.height = Clamp(f.height, 0.05f, 1.0f);
   f.falloff = Clamp(f.falloff, 0.0f, 0.5f);
@@ -290,7 +290,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   }
 
   ImGui::Combo("Debug view", &s.debug_view,
-               "Off\0What the model sees\0Model answer\0Difference x20\0");
+               "Off\0What the model sees\0Model answer\0Difference x20\0Fovea map (foveated NR)\0");
 
   ImGui::Separator();
   ImGui::TextUnformatted("Model settings (need Apply, rebuilds the feature)");

@@ -705,6 +705,7 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.out_w, s.out_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
                          (uint32_t)s.debug_view);
+  if (foveated && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
 }
 
 // Called after every successful game DLSS-SR evaluate, on the game's own command list.

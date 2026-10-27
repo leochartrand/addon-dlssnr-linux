@@ -24,6 +24,10 @@ cbuffer FovConstants : register(b0)
     uint g_fwd;        // offsets into Lut, in floats
     uint g_prev;
     uint g_inv;
+    float g_centre_x;  // debug view only: the fovea centre and the raw gaze point, full pixels
+    float g_centre_y;  // (gaze x < 0 = no gaze)
+    float g_gaze_x;
+    float g_gaze_y;
 };
 
 // Continuous lookup into a per-pixel-centre table: pos is a coordinate in that table's space

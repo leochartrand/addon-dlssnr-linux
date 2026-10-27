@@ -29,12 +29,13 @@
 
 #include "../build/shaders/fov_squeeze_dxil.h"
 #include "../build/shaders/fov_expand_dxil.h"
+#include "../build/shaders/fov_debug_dxil.h"
 
 namespace fov {
 
 constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploads in flight
-constexpr uint32_t kSlotsPerFrame = 14;   // squeeze 4 SRV + 3 UAV, expand 4 SRV + 3 UAV
-constexpr uint32_t kConstants = 11;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kSlotsPerFrame = 21;   // squeeze, expand, debug: 4 SRV + 3 UAV each
+constexpr uint32_t kConstants = 15;       // FovConstants in fov_common.hlsli
 
 // --- settings (persisted by addon.cpp) -----------------------------------
 
@@ -194,6 +195,7 @@ struct State {
   ID3D12RootSignature* root_sig = nullptr;
   ID3D12PipelineState* squeeze_pso = nullptr;
   ID3D12PipelineState* expand_pso = nullptr;
+  ID3D12PipelineState* debug_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t descriptor_size = 0;
   ID3D12Resource* lut[kRingSize] = {};   // upload heap, persistently mapped
@@ -243,6 +245,7 @@ inline void Release() {
   if (g.heap != nullptr) g.heap->Release();
   if (g.squeeze_pso != nullptr) g.squeeze_pso->Release();
   if (g.expand_pso != nullptr) g.expand_pso->Release();
+  if (g.debug_pso != nullptr) g.debug_pso->Release();
   if (g.root_sig != nullptr) g.root_sig->Release();
   g = {};
 }
@@ -293,6 +296,8 @@ inline bool Init(ID3D12Device* device) {
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.squeeze_pso)))) { g.failed = true; return false; }
   pso.CS = {fov_expand_dxil, sizeof(fov_expand_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.expand_pso)))) { g.failed = true; return false; }
+  pso.CS = {fov_debug_dxil, sizeof(fov_debug_dxil)};
+  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.debug_pso)))) { g.failed = true; return false; }
 
   D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRingSize * kSlotsPerFrame,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
@@ -504,7 +509,7 @@ inline bool Squeeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D1
   Uav(device, base + 5, g.depth_s, DXGI_FORMAT_UNKNOWN);
   Uav(device, base + 6, g.motion_s, DXGI_FORMAT_UNKNOWN);
 
-  uint32_t c[kConstants];
+  uint32_t c[kConstants] = {};
   float f;
   c[0] = full_w; c[1] = full_h; c[2] = g.x.work; c[3] = g.y.work;
   c[4] = render_w; c[5] = render_h;
@@ -544,7 +549,7 @@ inline void Expand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, uint3
 
   const uint32_t full_w = g.x.full, full_h = g.y.full;
   uint32_t c[kConstants] = {full_w, full_h, g.x.work, g.y.work, 1, 1, 0, 0,
-                            0, full_w + full_h, 2 * (full_w + full_h)};
+                            0, full_w + full_h, 2 * (full_w + full_h), 0, 0, 0, 0};
   cmd->SetDescriptorHeaps(1, &g.heap);
   cmd->SetComputeRootSignature(g.root_sig);
   cmd->SetPipelineState(g.expand_pso);
@@ -556,6 +561,43 @@ inline void Expand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, uint3
   Barrier(cmd, g.answer_s, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   for (ID3D12Resource* t : {g.proxy_s, g.depth_s, g.motion_s})
     Barrier(cmd, t, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  device->Release();
+}
+
+// Debug view 4: tint the finished frame by the resolution the model saw there and mark the fovea
+// centre and the raw gaze point. The frame is the game's output, UNORDERED_ACCESS after the resolve.
+inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, uint32_t frame) {
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+  const uint32_t base = (frame % kRingSize) * kSlotsPerFrame + 14;
+  Srv(device, base + 0, nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
+  Srv(device, base + 1, nullptr, DXGI_FORMAT_R32_FLOAT);
+  Srv(device, base + 2, nullptr, DXGI_FORMAT_R16G16_FLOAT);
+  LutSrv(device, base + 3, frame);
+  Uav(device, base + 4, frame_res, DXGI_FORMAT_UNKNOWN);
+  Uav(device, base + 5, nullptr, DXGI_FORMAT_R32_FLOAT);
+  Uav(device, base + 6, nullptr, DXGI_FORMAT_R16G16_FLOAT);
+
+  const uint32_t full_w = g.x.full, full_h = g.y.full;
+  float gx = -1.0f, gy = -1.0f;
+  if (GazeLatest(&gx, &gy)) { gx *= (float)full_w; gy *= (float)full_h; }
+  else gx = gy = -1.0f;
+  const float floats[4] = {g.centre_x, g.centre_y, gx, gy};
+  uint32_t c[kConstants] = {full_w, full_h, g.x.work, g.y.work, 1, 1, 0, 0,
+                            0, full_w + full_h, 2 * (full_w + full_h)};
+  std::memcpy(&c[11], floats, sizeof(floats));
+
+  D3D12_RESOURCE_BARRIER uav = {};
+  uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  uav.UAV.pResource = frame_res;
+  cmd->ResourceBarrier(1, &uav);   // after the resolve's writes
+  cmd->SetDescriptorHeaps(1, &g.heap);
+  cmd->SetComputeRootSignature(g.root_sig);
+  cmd->SetPipelineState(g.debug_pso);
+  cmd->SetComputeRootDescriptorTable(0, Gpu(base + 0));
+  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 4));
+  cmd->SetComputeRoot32BitConstants(2, kConstants, c, 0);
+  cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
   device->Release();
 }
 
