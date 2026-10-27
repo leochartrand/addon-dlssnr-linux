@@ -18,8 +18,9 @@
 //
 //   split squeeze: proxy -> atlas (crop | low-res frame), depth and motion likewise
 //   model:         the atlas
-//   split low:     low-res answer, input and crop answer, side by side at the low resolution
-//   split blur:    Gaussian (H, then V forming the gains answer/input and answer/crop)
+//   split low:     the model's change (log answer - log input) of the low-res frame and of the
+//                  crop, at the low resolution
+//   split blur:    Gaussian (H, then V forming the log gains: global change; global - crop change)
 //   split expand:  periphery = input x its gain; fovea = crop answer x its gain, feathered in
 
 #pragma once

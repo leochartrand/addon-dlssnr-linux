@@ -1,6 +1,6 @@
-// Split foveation: a separable Gaussian over the three low-resolution pictures. The horizontal
-// pass writes them blurred; the vertical pass finishes the blur and writes the two tone gains --
-// whole-frame answer over input (for the periphery) and whole-frame answer over crop answer (for
+// Split foveation: a separable Gaussian over the low-resolution change maps. The horizontal pass
+// writes them blurred; the vertical pass finishes the blur and writes the two log gains -- the
+// whole-frame pass's broad change (for the periphery) and that minus the crop's broad change (for
 // the fovea) -- so both regions end up with the same broad brightness and colour.
 #include "fov_common.hlsli"
 
@@ -44,8 +44,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     else
     {
-        const float e = 0.002;   // keeps near-black ratios from blowing up
-        OutA[id.xy] = float4(clamp((gl.rgb + e) / (in_.rgb + e), 0.25, 4.0), 1.0);
-        OutB[id.xy] = float4(clamp((gl.rgb + e) / (cr.rgb + e), 0.25, 4.0), 1.0);
+        OutA[id.xy] = float4(gl.rgb, 0.0);
+        OutB[id.xy] = float4(gl.rgb - cr.rgb, 0.0);
     }
 }
