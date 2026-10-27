@@ -2,9 +2,12 @@
 // low-res grid). The vertical pass writes the two offsets the expand adds: the whole-frame pass's
 // (for the periphery) and that minus the crop's (for the fovea), so both regions take their coarse
 // brightness and colour from the same pass. The whole-frame offset is also blended over time with
-// last frame's, carried along the motion vectors, so the tone map -- shadows above all -- holds
-// still while the camera moves; on frames where the whole-frame pass did not run, the carried
-// history is used alone.
+// last frame's, carried along the motion vectors, and gated by the game's own picture: where the
+// input (blurred, reprojected) has not changed beyond a dead band, the tone barely moves, so the
+// model's frame-to-frame noise -- it re-draws its detail from fresh noise every frame -- and small
+// animation do not flicker it; where the input really changes, the tone follows at once. On frames
+// where the whole-frame pass did not run, the carried history is used alone. The history keeps the
+// tone in rgb and the blurred input's luma in a.
 #include "fov_common.hlsli"
 
 Texture2D<float4> InGlobal : register(t0);
@@ -15,6 +18,8 @@ Texture2D<float2> Motion : register(t5);    // V pass: the game's motion vectors
 RWTexture2D<float4> OutA : register(u0);
 RWTexture2D<float4> OutB : register(u1);
 RWTexture2D<float4> OutC : register(u2);
+
+float Brightness(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -59,11 +64,16 @@ void main(uint3 id : SV_DispatchThreadID)
             float2 prev_uv = (full + Motion[rp] * float2(g_mv_scale_x, g_mv_scale_y) / to_render) /
                              float2(g_full_w, g_full_h);
             bool on_screen = all(prev_uv >= 0.0) && all(prev_uv <= 1.0);
-            float a = on_screen ? g_tone_alpha : 1.0;
-            tone = lerp(History.SampleLevel(Linear, prev_uv, 0).rgb, gl.rgb, a);
+            float4 hist = History.SampleLevel(Linear, prev_uv, 0);
+            float change = abs(Brightness(in_.rgb) - hist.a);
+            float follow = smoothstep(g_tone_deadband, 4.0 * g_tone_deadband, change);
+            float a = g_tone_alpha == 0.0 ? 0.0 : lerp(g_tone_alpha, 1.0, follow);
+            if (!on_screen && g_tone_alpha > 0.0)
+                a = 1.0;
+            tone = lerp(hist.rgb, gl.rgb, a);
         }
         OutA[id.xy] = float4(tone, 0.0);
         OutB[id.xy] = float4(tone - cr.rgb, 0.0);
-        OutC[id.xy] = float4(tone, 0.0);
+        OutC[id.xy] = float4(tone, Brightness(in_.rgb));
     }
 }

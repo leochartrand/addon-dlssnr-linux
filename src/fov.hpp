@@ -52,7 +52,7 @@ constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploa
 enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
 constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the LUT), u0-u2
-constexpr uint32_t kConstants = 28;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kConstants = 29;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -71,7 +71,8 @@ struct Settings {
   float global_scale = 0.25f;  // split: the low-res frame's size, per axis
   float grade_blur = 1.0f;     // split: softening of the low-res offsets, sigma in low-res pixels
   int split_calls = 2;         // split: 2 = a model call per region (independent grading), 1 = one
-  float tone_smoothing = 0.7f; // split: weight of the carried tone history each frame (0 = none)
+  float tone_smoothing = 0.95f; // split: weight of the carried tone history where the scene is still
+  float tone_deadband = 0.01f;  // split: input change (display units) below which the tone holds
   int global_every = 1;        // split: run the whole-frame pass every Nth frame (history between)
 };
 
@@ -804,6 +805,7 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   smoothing = smoothing < 0.0f ? 0.0f : (smoothing > 0.95f ? 0.95f : smoothing);
   const float alpha = !g.hist_valid ? 1.0f : (global_fresh ? 1.0f - smoothing : 0.0f);
   std::memcpy(&c[27], &alpha, 4);
+  std::memcpy(&c[28], &settings.tone_deadband, 4);
 
   Barrier(cmd, g.answer_s, kUav, kSrv);
   Bind(device, cmd, g.split_pso[1], frame, kSplitLow,

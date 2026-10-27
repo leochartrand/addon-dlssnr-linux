@@ -144,6 +144,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
   reshade::get_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::get_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
+  reshade::get_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
 
   // A hand-edited ini must not push values past what the overlay allows.
@@ -168,6 +169,7 @@ void LoadSettings() {
   f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
+  f.tone_deadband = Clamp(f.tone_deadband, 0.0f, 0.1f);
   if (f.global_every < 1 || f.global_every > 4) f.global_every = 1;
 }
 
@@ -206,6 +208,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
   reshade::set_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::set_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
+  reshade::set_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
 }
 
@@ -284,6 +287,7 @@ void PollLiveSettings() {
   f.grade_blur = LiveFloat(path, "GradeBlur", f.grade_blur);
   f.split_calls = LiveInt(path, "SplitCalls", f.split_calls);
   f.tone_smoothing = LiveFloat(path, "ToneSmoothing", f.tone_smoothing);
+  f.tone_deadband = LiveFloat(path, "ToneDeadband", f.tone_deadband);
   f.global_every = LiveInt(path, "GlobalEvery", f.global_every);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
@@ -309,6 +313,7 @@ void PollLiveSettings() {
   f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
+  f.tone_deadband = Clamp(f.tone_deadband, 0.0f, 0.1f);
   if (f.global_every < 1 || f.global_every > 4) f.global_every = 1;
 
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
@@ -413,7 +418,8 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       f.split_calls = two ? 2 : 1;
       changed = true;
     }
-    changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.7f);
+    changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
+    changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
     changed |= ImGui::SliderInt("Whole-frame pass every", &f.global_every, 1, 4, "%d frames");
   }
   changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
