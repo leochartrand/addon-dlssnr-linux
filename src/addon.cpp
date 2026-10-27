@@ -4,6 +4,7 @@
 // and installs the NGX CreateFeature/EvaluateFeature interception
 // (ngx_probe.hpp) that the runner and colour bridge are driven by.
 
+#include <winsock2.h>  // before windows.h: fov.hpp streams the gaze point over UDP
 #include <windows.h>
 
 #include <cstdio>
@@ -107,6 +108,17 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "Preset", s.preset);
   reshade::get_config_value(nullptr, kConfigSection, "Style", s.style);
 
+  auto& f = fov::settings;
+  reshade::get_config_value(nullptr, kConfigSection, "Foveation", f.enabled);
+  reshade::get_config_value(nullptr, kConfigSection, "FoveaWidth", f.width);
+  reshade::get_config_value(nullptr, kConfigSection, "FoveaHeight", f.height);
+  reshade::get_config_value(nullptr, kConfigSection, "FoveaFalloff", f.falloff);
+  reshade::get_config_value(nullptr, kConfigSection, "FoveaEdge", f.edge);
+  reshade::get_config_value(nullptr, kConfigSection, "GazeSource", f.gaze_source);
+  reshade::get_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
+  reshade::get_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
+  reshade::get_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
+
   // A hand-edited ini must not push values past what the overlay allows.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
   s.colour_strength = Clamp(s.colour_strength, 0.0f, 1.0f);
@@ -117,6 +129,14 @@ void LoadSettings() {
   s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
+  f.width = Clamp(f.width, 0.05f, 1.0f);
+  f.height = Clamp(f.height, 0.05f, 1.0f);
+  f.falloff = Clamp(f.falloff, 0.0f, 0.5f);
+  f.edge = Clamp(f.edge, 0.25f, 1.0f);
+  if (f.gaze_source < 0 || f.gaze_source > 1) f.gaze_source = 0;
+  if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
+  f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
+  f.jump_reset = Clamp(f.jump_reset, 0.02f, 2.0f);
 }
 
 void SaveSettings() {
@@ -130,6 +150,17 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GlobalIntensity", s.local_tone);
   reshade::set_config_value(nullptr, kConfigSection, "Preset", s.preset);
   reshade::set_config_value(nullptr, kConfigSection, "Style", s.style);
+
+  const auto& f = fov::settings;
+  reshade::set_config_value(nullptr, kConfigSection, "Foveation", f.enabled);
+  reshade::set_config_value(nullptr, kConfigSection, "FoveaWidth", f.width);
+  reshade::set_config_value(nullptr, kConfigSection, "FoveaHeight", f.height);
+  reshade::set_config_value(nullptr, kConfigSection, "FoveaFalloff", f.falloff);
+  reshade::set_config_value(nullptr, kConfigSection, "FoveaEdge", f.edge);
+  reshade::set_config_value(nullptr, kConfigSection, "GazeSource", f.gaze_source);
+  reshade::set_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
+  reshade::set_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
+  reshade::set_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
 }
 
 // A slider with a reset-to-default button on its right.
@@ -200,6 +231,31 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   ImGui::PopID();
 
   if (ImGui::Button("Apply model settings")) nr_runner::ApplyModelSettings();
+
+  // Geometry changes rebuild the feature at its new size by themselves (the next frame); the
+  // gaze controls apply live.
+  ImGui::Separator();
+  ImGui::TextUnformatted("Foveation (the model runs on a squeezed frame)");
+  auto& f = fov::settings;
+  changed |= ImGui::Checkbox("Foveated NR", &f.enabled);
+  changed |= SliderWithReset("Fovea width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
+  changed |= SliderWithReset("Fovea height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
+  changed |= SliderWithReset("Falloff", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
+  changed |= SliderWithReset("Edge resolution", &f.edge, 0.25f, 1.0f, "%.2f", 0.50f);
+  changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
+  if (f.gaze_source == 1) {
+    changed |= ImGui::InputInt("Gaze UDP port", &f.gaze_port);
+    changed |= SliderWithReset("Gaze smoothing", &f.gaze_smooth_ms, 0.0f, 200.0f, "%.0f ms", 30.0f);
+    float gx = 0.0f, gy = 0.0f;
+    if (fov::GazeLatest(&gx, &gy)) ImGui::Text("Gaze: %.3f, %.3f", gx, gy);
+    else ImGui::TextUnformatted("Gaze: no packets in the last 0.5 s (centre used)");
+  }
+  if (s.out_w != 0 && s.out_h != 0) {
+    uint32_t fw = 0, fh = 0;
+    fov::WorkSize(s.out_w, s.out_h, &fw, &fh);
+    ImGui::Text("Model works on %ux%u of %ux%u (%.0f%% of the pixels)", fw, fh, s.out_w, s.out_h,
+                100.0 * fw * fh / ((double)s.out_w * s.out_h));
+  }
 
   if (changed) SaveSettings();
 }

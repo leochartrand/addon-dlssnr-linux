@@ -38,6 +38,7 @@
 #include <nvsdk_ngx_defs.h>
 
 #include "nr_compose.hpp"
+#include "fov.hpp"
 
 #pragma comment(lib, "bcrypt")   // SHA-256 of the model DLL
 #pragma comment(lib, "version")  // its file-version resource
@@ -170,6 +171,18 @@ struct State {
 };
 
 inline State s;
+
+// The size the NR feature runs at: the display resolution, or the squeezed working size.
+inline void FeatureSize(unsigned* w, unsigned* h) {
+  *w = s.out_w;
+  *h = s.out_h;
+  if (fov::settings.enabled && s.out_w != 0 && s.out_h != 0) {
+    uint32_t fw = 0, fh = 0;
+    fov::WorkSize(s.out_w, s.out_h, &fw, &fh);
+    *w = fw;
+    *h = fh;
+  }
+}
 
 inline const char* ResultName(int r) {
   switch ((unsigned)r) {
@@ -333,7 +346,9 @@ inline void OnDlssCreate(unsigned w, unsigned h, unsigned ow, unsigned oh, int f
   s.out_w = ow;
   s.out_h = oh;
   s.create_flags = flags;
-  if (s.feature != nullptr && (s.feature_w != ow || s.feature_h != oh))
+  unsigned fw = 0, fh = 0;
+  FeatureSize(&fw, &fh);
+  if (s.feature != nullptr && (s.feature_w != fw || s.feature_h != fh))
     RetireFeature("geometry changed");
 }
 
@@ -366,6 +381,7 @@ inline void Shutdown() {
     g = {};
   }
   nr_compose::Release();
+  fov::Release();
 }
 
 inline void SetEnabled(bool on) {
@@ -518,10 +534,12 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
     s.snippet_inited = true;
   }
 
+  unsigned fw = 0, fh = 0;
+  FeatureSize(&fw, &fh);
   void* p = s.caps;
   SetUInt(p, "DLSSNR.Enabled", 1u);
-  SetUInt(p, "DLSSNR.Width", s.out_w);
-  SetUInt(p, "DLSSNR.Height", s.out_h);
+  SetUInt(p, "DLSSNR.Width", fw);
+  SetUInt(p, "DLSSNR.Height", fh);
   SetUInt(p, "CreationNodeMask", 1u);
   SetUInt(p, "VisibilityNodeMask", 1u);
   SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)s.preset);
@@ -533,8 +551,11 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   ngx_probe::Logf("nr-fwd: CreateFeature(18) => 0x%x (%s) handle=%p", (unsigned)create_result,
                   ResultName(create_result), s.feature);
   if (s.feature == nullptr) return GiveUp("feature creation failed");
-  s.feature_w = s.out_w;
-  s.feature_h = s.out_h;
+  s.feature_w = fw;
+  s.feature_h = fh;
+  if (fw != s.out_w || fh != s.out_h)
+    ngx_probe::Logf("nr-fwd: foveated -- the model runs at %ux%u for a %ux%u frame (%.0f%% of the pixels)",
+                    fw, fh, s.out_w, s.out_h, 100.0 * fw * fh / ((double)s.out_w * s.out_h));
   // Evaluate from the next frame on, so the init work this create recorded executes first.
   return false;
 }
@@ -544,6 +565,7 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
 // If the model fails after RecordPre already ran, put every state back so the frame proceeds
 // with the original picture untouched.
 inline void AbortAfterPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_out) {
+  if (s.feature_w != s.out_w || s.feature_h != s.out_h) fov::Abort(cmd);
   nr_compose::Barrier(cmd, game_out, D3D12_RESOURCE_STATE_COPY_SOURCE,
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   nr_compose::Barrier(cmd, s.color_copy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -589,39 +611,75 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   const bool depth_inverted =
       (s.create_flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
 
+  // Foveated: the model gets working-size copies (motion vectors already in working pixels) and
+  // writes a working-size answer that Expand stretches back below. Built at the feature's size.
+  const bool foveated = s.feature_w != s.out_w || s.feature_h != s.out_h;
+  ID3D12Resource* in_color = s.proxy;
+  ID3D12Resource* in_depth = depth;
+  ID3D12Resource* in_motion = motion;
+  ID3D12Resource* answer = s.output;
+  unsigned guide_w = s.render_w, guide_h = s.render_h;
+  if (foveated) {
+    const bool squeezed = fov::Squeeze(cmd, s.proxy, depth, motion, s.out_w, s.out_h, s.render_w,
+                                       s.render_h, mv_scale_x, mv_scale_y, s.eval_count);
+    if (!squeezed || fov::g.x.work != s.feature_w || fov::g.y.work != s.feature_h) {
+      // A failed Squeeze transitioned nothing; a size that no longer matches the feature means
+      // the settings moved under us -- undo the squeeze and rebuild next frame.
+      if (squeezed) fov::Abort(cmd);
+      nr_compose::Barrier(cmd, color, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      nr_compose::Barrier(cmd, s.color_copy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      nr_compose::Barrier(cmd, s.proxy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      s.retire_pending = true;
+      return;
+    }
+    in_color = fov::g.proxy_s;
+    in_depth = fov::g.depth_s;
+    in_motion = fov::g.motion_s;
+    answer = fov::g.answer_s;
+    guide_w = s.feature_w;
+    guide_h = s.feature_h;
+    mv_scale_x = mv_scale_y = 1.0f;
+    if (fov::g.reset) reset = 1;
+    fov::g.reset = false;
+  }
+
   void* p = s.caps;
-  SetResource(p, "DLSSNR.Color", s.proxy);
-  SetResource(p, "DLSSNR.Depth", depth);
-  SetResource(p, "DLSSNR.MVec", motion);
-  SetResource(p, "DLSSNR.Output", s.output);
+  SetResource(p, "DLSSNR.Color", in_color);
+  SetResource(p, "DLSSNR.Depth", in_depth);
+  SetResource(p, "DLSSNR.MVec", in_motion);
+  SetResource(p, "DLSSNR.Output", answer);
 
   SetUInt(p, "DLSSNR.Enabled", 1u);
-  SetUInt(p, "DLSSNR.Width", s.out_w);
-  SetUInt(p, "DLSSNR.Height", s.out_h);
+  SetUInt(p, "DLSSNR.Width", s.feature_w);
+  SetUInt(p, "DLSSNR.Height", s.feature_h);
   SetUInt(p, "DLSSNR.DepthInverted", depth_inverted ? 1u : 0u);
   SetUInt(p, "DLSSNR.Reset", reset != 0 ? 1u : 0u);
 
   SetUInt(p, "DLSSNR.ColorSubrectBaseX", 0u);
   SetUInt(p, "DLSSNR.ColorSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.ColorSubrectWidth", s.out_w);
-  SetUInt(p, "DLSSNR.ColorSubrectHeight", s.out_h);
+  SetUInt(p, "DLSSNR.ColorSubrectWidth", s.feature_w);
+  SetUInt(p, "DLSSNR.ColorSubrectHeight", s.feature_h);
   SetUInt(p, "DLSSNR.OutputSubrectBaseX", 0u);
   SetUInt(p, "DLSSNR.OutputSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.OutputSubrectWidth", s.out_w);
-  SetUInt(p, "DLSSNR.OutputSubrectHeight", s.out_h);
+  SetUInt(p, "DLSSNR.OutputSubrectWidth", s.feature_w);
+  SetUInt(p, "DLSSNR.OutputSubrectHeight", s.feature_h);
   SetUInt(p, "DLSSNR.DepthSubrectBaseX", 0u);
   SetUInt(p, "DLSSNR.DepthSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.DepthSubrectWidth", s.render_w);
-  SetUInt(p, "DLSSNR.DepthSubrectHeight", s.render_h);
+  SetUInt(p, "DLSSNR.DepthSubrectWidth", guide_w);
+  SetUInt(p, "DLSSNR.DepthSubrectHeight", guide_h);
   SetUInt(p, "DLSSNR.MVecSubrectBaseX", 0u);
   SetUInt(p, "DLSSNR.MVecSubrectBaseY", 0u);
-  SetUInt(p, "DLSSNR.MVecSubrectWidth", s.render_w);
-  SetUInt(p, "DLSSNR.MVecSubrectHeight", s.render_h);
+  SetUInt(p, "DLSSNR.MVecSubrectWidth", guide_w);
+  SetUInt(p, "DLSSNR.MVecSubrectHeight", guide_h);
 
   SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
   SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
   WriteTuning(p);
 
+  const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
   const uint32_t n = ++s.eval_count;
   const int result = s.evaluate(cmd, s.feature, s.caps);
 
@@ -640,6 +698,7 @@ inline void Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     return;
   }
   s.fail_streak = 0;
+  if (foveated) fov::Expand(cmd, s.output, frame);
 
   // Anchor the model's answer to the original and write the blend into the game's output, which
   // its post-processing reads next.
@@ -657,6 +716,12 @@ inline void OnDlssEvaluated(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Para
   if (s.retire_pending.exchange(false, std::memory_order_relaxed))
     RetireFeature("model settings changed");
   if (!s.enabled) return;
+  {
+    unsigned fw = 0, fh = 0;
+    FeatureSize(&fw, &fh);
+    if (s.feature != nullptr && (s.feature_w != fw || s.feature_h != fh))
+      RetireFeature("foveation geometry changed");
+  }
 
   if (!EnsureSetup(cmd)) return;
   if (!EnsureFeature(cmd)) return;

@@ -101,6 +101,23 @@ wiki and please report your own setup.
 > ⚠️ Third-party add-ons in an online game with anti-cheat carry a risk to your account. Use at
 > your own risk.
 
+## Foveated NR (optional)
+
+The model's cost follows its pixel count. With **Foveated NR** on (overlay → Foveation), the frame is
+squeezed before the model -- 1:1 inside a fovea, blending down to the edge resolution beyond it,
+the FoveatedDLSS5 geometry -- and the answer is stretched back before the resolve. Depth and motion
+vectors are squeezed with it; motion vectors are re-expressed through the previous *and* current
+mapping, so the model's history survives a moving fovea and only a jump resets it.
+
+The fovea sits at the frame centre, or follows a gaze point streamed to `127.0.0.1:47620` (UDP;
+**Fovea centre → Gaze over UDP**): each packet is two little-endian float32, x then y, normalised
+0..1 from the top-left. Wine's sockets are the host's, so a native Linux eye tracker can send
+directly. With no packet for half a second the fovea returns to the centre.
+
+Settings live in `ReShade.ini` under `[ADDON_DLSSNR_LINUX]`: `Foveation`, `FoveaWidth`, `FoveaHeight`
+(fractions of the frame), `FoveaFalloff` (fraction of the height), `FoveaEdge`, `GazeSource`
+(0 centre, 1 UDP), `GazePort`, `GazeSmoothMs`, `GazeJumpReset`.
+
 ## Building
 
 Install the toolchain and dependencies once (LLVM/clang + LLD, the xwin-provided MSVC SDK at
