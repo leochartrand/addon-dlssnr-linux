@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstdlib>
 
 #pragma comment(lib, "user32")  // GetAsyncKeyState for the F10 toggle
 
@@ -72,6 +73,8 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 // so retry the Detours attach on every present until it lands. Detours
 // patches function bodies, so attaching after the game cached the function
 // pointers still works.
+void PollLiveSettings();  // below, with the rest of the settings code
+
 void OnPresent(reshade::api::command_queue*, reshade::api::swapchain*,
                const reshade::api::rect*, const reshade::api::rect*,
                uint32_t, const reshade::api::rect*) {
@@ -82,6 +85,8 @@ void OnPresent(reshade::api::command_queue*, reshade::api::swapchain*,
   const bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
   if (f10_down && !f10_was_down) nr_runner::SetEnabled(!nr_runner::IsEnabled());
   f10_was_down = f10_down;
+
+  PollLiveSettings();
 }
 
 // --- settings persistence -------------------------------------------------
@@ -161,6 +166,94 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
   reshade::set_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
   reshade::set_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
+}
+
+// --- live settings from another process ----------------------------------
+// When this add-on runs inside a helper process (DLSS5-Feeder's host64), its overlay lives in a
+// window the player never looks at. The helper's parent can instead write the same settings to
+// dlssnr-linux-live.ini beside this exe; it is polled twice a second and whatever it holds is
+// applied and saved like an overlay edit. A file of its own, not ReShade.ini: ReShade caches that
+// one and would write its stale copy back over another process's edits.
+
+void LiveIniPath(char* out) {
+  GetModuleFileNameA(nullptr, out, MAX_PATH);
+  if (char* slash = strrchr(out, '\\')) strcpy_s(slash + 1, MAX_PATH - (slash + 1 - out), "dlssnr-linux-live.ini");
+}
+
+float LiveFloat(const char* path, const char* key, float current) {
+  char buf[64];
+  GetPrivateProfileStringA("DLSSNR", key, "", buf, sizeof(buf), path);
+  return buf[0] != 0 ? (float)atof(buf) : current;
+}
+
+int LiveInt(const char* path, const char* key, int current) {
+  return (int)GetPrivateProfileIntA("DLSSNR", key, current, path);
+}
+
+void PollLiveSettings() {
+  static ULONGLONG next_check = 0;
+  static FILETIME last_write = {};
+  const ULONGLONG now = GetTickCount64();
+  if (now < next_check) return;
+  next_check = now + 500;
+
+  char path[MAX_PATH];
+  LiveIniPath(path);
+  WIN32_FILE_ATTRIBUTE_DATA attr;
+  if (!GetFileAttributesExA(path, GetFileExInfoStandard, &attr)) return;
+  if (CompareFileTime(&attr.ftLastWriteTime, &last_write) == 0) return;
+  last_write = attr.ftLastWriteTime;
+
+  auto& s = nr_runner::s;
+  auto& f = fov::settings;
+  const float old_model[3] = {s.intensity, s.local_structure, s.local_tone};
+  const int old_preset = s.preset, old_style = s.style;
+
+  nr_runner::SetEnabled(LiveInt(path, "Enabled", nr_runner::IsEnabled() ? 1 : 0) != 0);
+  s.debug_view = LiveInt(path, "DebugView", s.debug_view);
+  s.transfer = LiveFloat(path, "DetailStrength", s.transfer);
+  s.colour_strength = LiveFloat(path, "ColourStrength", s.colour_strength);
+  s.max_ratio = LiveFloat(path, "HighlightGuard", s.max_ratio);
+  s.wp_scale = LiveFloat(path, "WhitePointScale", s.wp_scale);
+  s.intensity = LiveFloat(path, "Intensity", s.intensity);
+  s.local_structure = LiveFloat(path, "StructureIntensity", s.local_structure);
+  s.local_tone = LiveFloat(path, "GlobalIntensity", s.local_tone);
+  s.preset = LiveInt(path, "Preset", s.preset);
+  s.style = LiveInt(path, "Style", s.style);
+  f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
+  f.width = LiveFloat(path, "FoveaWidth", f.width);
+  f.height = LiveFloat(path, "FoveaHeight", f.height);
+  f.falloff = LiveFloat(path, "FoveaFalloff", f.falloff);
+  f.edge = LiveFloat(path, "FoveaEdge", f.edge);
+  f.gaze_source = LiveInt(path, "GazeSource", f.gaze_source);
+  f.gaze_port = LiveInt(path, "GazePort", f.gaze_port);
+  f.gaze_smooth_ms = LiveFloat(path, "GazeSmoothMs", f.gaze_smooth_ms);
+
+  // The same bounds a hand-edited ReShade.ini gets.
+  s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
+  s.colour_strength = Clamp(s.colour_strength, 0.0f, 1.0f);
+  s.max_ratio = Clamp(s.max_ratio, 1.0f, 8.0f);
+  s.wp_scale = Clamp(s.wp_scale, 0.1f, 4.0f);
+  s.intensity = Clamp(s.intensity, 0.0f, 2.0f);
+  s.local_structure = Clamp(s.local_structure, 0.0f, 2.0f);
+  s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
+  if (s.preset < 0 || s.preset > 7) s.preset = 0;
+  if (s.style < 0 || s.style > 2) s.style = 0;
+  if (s.debug_view < 0 || s.debug_view > 3) s.debug_view = 0;
+  f.width = Clamp(f.width, 0.05f, 1.0f);
+  f.height = Clamp(f.height, 0.05f, 1.0f);
+  f.falloff = Clamp(f.falloff, 0.0f, 0.5f);
+  f.edge = Clamp(f.edge, 0.25f, 1.0f);
+  if (f.gaze_source < 0 || f.gaze_source > 1) f.gaze_source = 0;
+  if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
+  f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
+
+  // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
+  if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
+      s.local_tone != old_model[2] || s.preset != old_preset || s.style != old_style)
+    nr_runner::ApplyModelSettings();
+  SaveSettings();
+  ngx_probe::Log("nr-fwd: live settings applied from dlssnr-linux-live.ini");
 }
 
 // A slider with a reset-to-default button on its right.
