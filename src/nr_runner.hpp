@@ -166,6 +166,10 @@ struct State {
   float skin_structure = -1.0f;
   float global_tone = -1.0f;
   float scaling_ratio = 0.0f;
+  // Split in two calls: the crop's network, when it should differ from `preset` (-1 = the same).
+  // Lets the low-res pass, which sets the look everywhere, run a network that holds up at small
+  // sizes while the full-res crop runs a cheaper one.
+  int split_crop_preset = -1;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -586,13 +590,13 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   unsigned fw = 0, fh = 0;
   FeatureSize(&fw, &fh);
   void* p = s.caps;
-  auto create = [&](unsigned w, unsigned h) {
+  auto create = [&](unsigned w, unsigned h, int preset) {
     SetUInt(p, "DLSSNR.Enabled", 1u);
     SetUInt(p, "DLSSNR.Width", w);
     SetUInt(p, "DLSSNR.Height", h);
     SetUInt(p, "CreationNodeMask", 1u);
     SetUInt(p, "VisibilityNodeMask", 1u);
-    SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)s.preset);
+    SetUInt(p, "DLSSNR.Hint.Render.Preset", (unsigned)preset);
     WriteTuning(p);
     int create_result = 0;
     void* f = s.create(cmd, s.caps, &create_result);
@@ -603,14 +607,14 @@ inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   const int calls = WantedCalls();
   if (calls == 2) {
     const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
-    s.feature = create(l.crop_w, l.crop_h);
-    s.feature2 = s.feature != nullptr ? create(l.low_w, l.low_h) : nullptr;
+    s.feature = create(l.crop_w, l.crop_h, s.split_crop_preset >= 0 ? s.split_crop_preset : s.preset);
+    s.feature2 = s.feature != nullptr ? create(l.low_w, l.low_h, s.preset) : nullptr;
     if (s.feature2 == nullptr) {
       if (s.feature != nullptr) Bury(nullptr, s.feature);
       s.feature = nullptr;
     }
   } else {
-    s.feature = create(fw, fh);
+    s.feature = create(fw, fh, s.preset);
   }
   if (s.feature == nullptr) return GiveUp("feature creation failed");
   s.feature_calls = calls;
