@@ -39,9 +39,16 @@ float Unit(uint s)
 
 float Half(float x) { return f16tof32(f32tof16(x)); }
 
+// The lift's nine non-zero columns (noise 0-2, the constant 3, conditioning 10-14), loaded once per group.
+static const uint kUsed[9] = {0, 1, 2, 3, 10, 11, 12, 13, 14};
+groupshared float lift_s[32 * 9];
+
 [numthreads(8, 8, 1)]
-void main(uint3 id : SV_DispatchThreadID)
+void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
+    for (uint i = gi; i < 32 * 9; i += 64)
+        lift_s[i] = asfloat(Lift.Load(((i / 9) * 16 + kUsed[i % 9]) * 4));
+    GroupMemoryBarrierWithGroupSync();
     if (id.x >= g_w || id.y >= g_h)
         return;
     uint h0 = Pcg((id.x * 0x8DA6B343u) ^ (g_seed * 0x9E3779B9u) ^ (id.y * 0xD8163841u) ^ 0x243F6A88u);
@@ -51,18 +58,18 @@ void main(uint3 id : SV_DispatchThreadID)
     float ra = sqrt(-2.0 * log(ua)), rc = sqrt(-2.0 * log(uc));
     const float two_pi = 6.28318530718;
 
-    float f[16];
+    // The features the lift reads, in feature order; the colour features (4-9) and the pad (15) are zero
+    // here (the program adds the colour), so skipping them leaves every sum as it was.
+    float f[9];
     f[0] = Half(g_noise_gain * ra * cos(ub * two_pi));
     f[1] = Half(g_noise_gain * ra * sin(ub * two_pi));
     f[2] = Half(g_noise_gain * rc * cos(ud * two_pi));
     f[3] = g_constant;
-    [unroll] for (int k = 4; k < 10; ++k) f[k] = 0.0;   // the colour features: added by the program
-    f[10] = Half(g_style);
-    f[11] = Half(g_tone);
-    f[12] = Half(g_structure);
-    f[13] = Half(g_skin);
-    f[14] = Half(g_other);
-    f[15] = 0.0;
+    f[4] = Half(g_style);
+    f[5] = Half(g_tone);
+    f[6] = Half(g_structure);
+    f[7] = Half(g_skin);
+    f[8] = Half(g_other);
 
     uint at = (id.y * g_w + id.x) * 64;   // 32 halves per pixel
     [unroll] for (uint q = 0; q < 4; ++q)
@@ -72,10 +79,10 @@ void main(uint3 id : SV_DispatchThreadID)
         {
             uint c = q * 8 + j * 2;
             float a = 0.0, b = 0.0;
-            [unroll] for (int k = 0; k < 16; ++k)
+            [unroll] for (int k = 0; k < 9; ++k)
             {
-                a += asfloat(Lift.Load((c * 16 + k) * 4)) * f[k];
-                b += asfloat(Lift.Load(((c + 1) * 16 + k) * 4)) * f[k];
+                a += lift_s[c * 9 + k] * f[k];
+                b += lift_s[(c + 1) * 9 + k] * f[k];
             }
             packed[j] = f32tof16(a) | (f32tof16(b) << 16);
         }
