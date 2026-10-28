@@ -71,13 +71,18 @@ float2 Inverse(uint2 work_px)
 }
 
 // Mean of a full-resolution texture over a scale-sized footprint around a full-resolution
-// position: four bilinear taps, each the mean of a 2x2 block (exact for a 4x scale).
+// position: n x n bilinear taps per axis pair, each the mean of a 2x2 block, n = ceil(scale / 2)
+// (up to 4: footprints to 8x). Fewer taps than the footprint needs would skip pixels, and the
+// small picture would alias -- shimmer as the camera pans.
 float4 BoxSample(Texture2D<float4> src, float2 full, float2 scale)
 {
     float2 inv = 1.0 / float2(g_full_w, g_full_h);
-    float2 o = scale * 0.25;
-    return 0.25 * (src.SampleLevel(Linear, (full + float2(-o.x, -o.y)) * inv, 0) +
-                   src.SampleLevel(Linear, (full + float2(o.x, -o.y)) * inv, 0) +
-                   src.SampleLevel(Linear, (full + float2(-o.x, o.y)) * inv, 0) +
-                   src.SampleLevel(Linear, (full + float2(o.x, o.y)) * inv, 0));
+    uint2 n = (uint2)clamp(ceil(scale * 0.5), 1.0, 4.0);
+    float2 step = scale / (float2)n;               // tap spacing: the footprint in n equal cells
+    float2 first = full - 0.5 * scale + 0.5 * step;
+    float4 sum = 0.0;
+    for (uint y = 0; y < n.y; ++y)
+        for (uint x = 0; x < n.x; ++x)
+            sum += src.SampleLevel(Linear, (first + step * float2(x, y)) * inv, 0);
+    return sum / (float)(n.x * n.y);
 }
