@@ -669,6 +669,11 @@ inline void AbortAfterPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_o
 // frame_h): the game's DLSS output, or our copy of its input. True when the model's answer landed.
 inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params,
                      ID3D12Resource* color) {
+  // CPU time spent recording the pass (on the frame's critical path), and the model calls' share.
+  LARGE_INTEGER cpu_t0, cpu_freq;
+  QueryPerformanceCounter(&cpu_t0);
+  QueryPerformanceFrequency(&cpu_freq);
+  LONGLONG model_ticks = 0;
   // The model sees the frame's encoded proxy, and the game's DLSS guides are the model's guides.
   ID3D12Resource* depth = nullptr;
   ID3D12Resource* motion = nullptr;
@@ -795,6 +800,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
       return 1;
     return s.evaluate(cmd, feature, s.caps);
   };
+  LARGE_INTEGER model_t0;
+  QueryPerformanceCounter(&model_t0);
   int result;
   // Split: the whole-frame pass may run only every Nth frame, the tone history carrying it in
   // between. Its feature then sees frames N apart with one frame's motion vectors, so it is reset
@@ -813,6 +820,11 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     result = call(s.feature, 0, 0, s.feature_w, s.feature_h);
   }
   if (use_engine) nr_engine::EndFrame(cmd);
+  {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    model_ticks = now.QuadPart - model_t0.QuadPart;
+  }
 
   if (n <= kFullLogs || n % kHeartbeatEvery == 0) {
     ngx_probe::Logf("nr-fwd: %s #%u => 0x%x (%s)", use_engine ? "engine" : "EvaluateFeature", n,
@@ -844,6 +856,20 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   if (foveated && !pass_debug && s.debug_view == 4) fov::DebugMap(cmd, color, frame, split);
   diag::Mark(cmd, diag::kResolve);
   diag::End(cmd);
+  {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    static double sum_all = 0.0, sum_model = 0.0;
+    static uint32_t frames = 0;
+    sum_all += 1e3 * (double)(now.QuadPart - cpu_t0.QuadPart) / (double)cpu_freq.QuadPart;
+    sum_model += 1e3 * (double)model_ticks / (double)cpu_freq.QuadPart;
+    if (++frames == 300) {
+      ngx_probe::Logf("timing: CPU ms/frame recording the pass %.3f, of which the model calls %.3f (%s)",
+                      sum_all / frames, sum_model / frames, use_engine ? "engine" : "NGX");
+      sum_all = sum_model = 0.0;
+      frames = 0;
+    }
+  }
 
   char info[384];
   std::snprintf(info, sizeof(info),
