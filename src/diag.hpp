@@ -4,7 +4,8 @@
 //   timers: start | encode | squeeze | model | expand | resolve, every frame into a ring of
 //           readback slots; a slot is read back kRing frames later, when it has surely executed
 //   dump:   DumpFrame=<id> in the live ini copies both textures to readback buffers on the next
-//           evaluate and writes dlssnr-dump-<id>-{orig,final}.raw (+ .txt header) beside the exe
+//           evaluate and writes dlssnr-dump-<id>-{orig,final}.raw (+ .txt header) beside the exe;
+//           DumpBurst=N (1-8) makes it N consecutive frames, ids <id> .. <id>+N-1
 //           kRing frames later
 
 #pragma once
@@ -146,14 +147,23 @@ inline void End(ID3D12GraphicsCommandList* cmd) {
 
 // --- frame dump -----------------------------------------------------------
 
-struct Dump {
-  int done = 0;               // last id written
-  int pending = 0;            // id being copied, 0 if none
+// A dump is a burst of DumpBurst consecutive frames (1-8), written as ids want, want+1, ...
+constexpr int kBurstMax = 8;
+inline std::atomic<int> dump_burst{1};
+
+struct Slot {
+  int id = 0;                 // 0 if free
   uint32_t ready_at = 0;      // frame from which the copies have surely executed
   ID3D12Resource* rb[2] = {};
+  char info[512] = {};
+};
+
+struct Dump {
+  int done = 0;               // last request taken
+  int burst_left = 0, next_id = 0;
+  Slot slots[kBurstMax];
   D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
   UINT64 bytes = 0;
-  char info[512] = {};
 };
 
 inline Dump d;
@@ -183,60 +193,74 @@ inline void CopyOut(ID3D12GraphicsCommandList* cmd, ID3D12Resource* tex, ID3D12R
 // settings in effect, for the header.
 inline void Capture(ID3D12GraphicsCommandList* cmd, ID3D12Resource* original, ID3D12Resource* final_,
                     uint32_t frame, const char* info, LogFn log) {
-  const int want = dump_requested.load(std::memory_order_relaxed);
-  if (want == d.done || d.pending != 0) return;
+  if (d.burst_left == 0) {
+    const int want = dump_requested.load(std::memory_order_relaxed);
+    if (want == d.done) return;
+    for (const Slot& sl : d.slots)
+      if (sl.id != 0) return;   // the last burst is still being written
+    const int n = dump_burst.load(std::memory_order_relaxed);
+    d.burst_left = n < 1 ? 1 : (n > kBurstMax ? kBurstMax : n);
+    d.next_id = want;
+    d.done = want;
+  }
+  Slot* slot = nullptr;
+  for (Slot& sl : d.slots)
+    if (sl.id == 0) { slot = &sl; break; }
+  if (slot == nullptr) return;
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
   const D3D12_RESOURCE_DESC desc = final_->GetDesc();
   device->GetCopyableFootprints(&desc, 0, 1, 0, &d.fp, nullptr, nullptr, &d.bytes);
-  bool ok = CreateReadback(device, d.bytes, &d.rb[0]) && CreateReadback(device, d.bytes, &d.rb[1]);
+  bool ok = CreateReadback(device, d.bytes, &slot->rb[0]) && CreateReadback(device, d.bytes, &slot->rb[1]);
   device->Release();
   if (!ok || original->GetDesc().Format != desc.Format) {
-    for (auto*& r : d.rb) if (r != nullptr) { r->Release(); r = nullptr; }
-    d.done = want;
+    for (auto*& r : slot->rb) if (r != nullptr) { r->Release(); r = nullptr; }
+    d.burst_left = 0;
     log("dump: could not create the readback buffers");
     return;
   }
-  CopyOut(cmd, original, d.rb[0]);
-  CopyOut(cmd, final_, d.rb[1]);
-  std::snprintf(d.info, sizeof(d.info), "width=%llu\nheight=%u\nformat=%u\nrow_pitch=%u\n%s",
+  CopyOut(cmd, original, slot->rb[0]);
+  CopyOut(cmd, final_, slot->rb[1]);
+  std::snprintf(slot->info, sizeof(slot->info), "width=%llu\nheight=%u\nformat=%u\nrow_pitch=%u\n%s",
                 (unsigned long long)desc.Width, desc.Height, (unsigned)desc.Format,
                 d.fp.Footprint.RowPitch, info);
-  d.pending = want;
-  d.ready_at = frame + kRing;
+  slot->id = d.next_id++;
+  slot->ready_at = frame + kRing;
+  --d.burst_left;
 }
 
 // Every evaluate: once a dump's copies have executed, write the files beside the exe.
 inline void Poll(uint32_t frame, const wchar_t* dir, LogFn log) {
-  if (d.pending == 0 || frame < d.ready_at) return;
-  const char* names[2] = {"orig", "final"};
-  for (int i = 0; i < 2; ++i) {
-    wchar_t path[MAX_PATH];
-    swprintf_s(path, L"%s\\dlssnr-dump-%d-%S.raw", dir, d.pending, names[i]);
-    void* p = nullptr;
-    D3D12_RANGE range = {0, (SIZE_T)d.bytes};
-    if (SUCCEEDED(d.rb[i]->Map(0, &range, &p))) {
-      if (FILE* f = _wfopen(path, L"wb")) {
-        fwrite(p, 1, (size_t)d.bytes, f);
-        fclose(f);
+  for (Slot& sl : d.slots) {
+    if (sl.id == 0 || frame < sl.ready_at) continue;
+    const char* names[2] = {"orig", "final"};
+    for (int i = 0; i < 2; ++i) {
+      wchar_t path[MAX_PATH];
+      swprintf_s(path, L"%s\\dlssnr-dump-%d-%S.raw", dir, sl.id, names[i]);
+      void* p = nullptr;
+      D3D12_RANGE range = {0, (SIZE_T)d.bytes};
+      if (SUCCEEDED(sl.rb[i]->Map(0, &range, &p))) {
+        if (FILE* f = _wfopen(path, L"wb")) {
+          fwrite(p, 1, (size_t)d.bytes, f);
+          fclose(f);
+        }
+        D3D12_RANGE none = {0, 0};
+        sl.rb[i]->Unmap(0, &none);
       }
-      D3D12_RANGE none = {0, 0};
-      d.rb[i]->Unmap(0, &none);
+      sl.rb[i]->Release();
+      sl.rb[i] = nullptr;
     }
-    d.rb[i]->Release();
-    d.rb[i] = nullptr;
+    wchar_t path[MAX_PATH];
+    swprintf_s(path, L"%s\\dlssnr-dump-%d.txt", dir, sl.id);
+    if (FILE* f = _wfopen(path, L"wb")) {
+      fputs(sl.info, f);
+      fclose(f);
+    }
+    char line[96];
+    std::snprintf(line, sizeof(line), "dump: frame %d written", sl.id);
+    log(line);
+    sl.id = 0;
   }
-  wchar_t path[MAX_PATH];
-  swprintf_s(path, L"%s\\dlssnr-dump-%d.txt", dir, d.pending);
-  if (FILE* f = _wfopen(path, L"wb")) {
-    fputs(d.info, f);
-    fclose(f);
-  }
-  char line[96];
-  std::snprintf(line, sizeof(line), "dump: frame %d written", d.pending);
-  log(line);
-  d.done = d.pending;
-  d.pending = 0;
 }
 
 }  // namespace diag

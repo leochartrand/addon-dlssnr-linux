@@ -331,6 +331,7 @@ void PollLiveSettings() {
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
   s.engine_motion = Clamp(LiveFloat(path, "EngineMotion", s.engine_motion), 0.0f, 2.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
+  diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
