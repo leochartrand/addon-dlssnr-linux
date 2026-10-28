@@ -74,7 +74,8 @@ void main(uint3 id : SV_DispatchThreadID)
             tone = lerp(hist.rgb, gl.rgb, a);
         }
         // The history keeps the model's own tone; the picture gets it limited (g_relight, g_relight_mode).
-        float3 shown = tone * g_relight;
+        // Relight 0: the whole-frame pass did not run (details only); its region of the answer is stale.
+        float3 shown = g_relight > 0.0 ? tone * g_relight : 0.0;
         if (g_relight_mode == 1)
             shown = min(Brightness(shown), 0.0).xxx;
         OutA[id.xy] = float4(shown, 0.0);

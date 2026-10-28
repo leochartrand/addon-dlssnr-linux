@@ -825,7 +825,9 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
-    if (result == 1 && global_fresh && fov::settings.periphery_pass) {
+    // Relighting kept = 0 (details only): the periphery shows the game's frame and the crop keeps only its
+    // fine detail, so the whole-frame call has nothing to give and is skipped.
+    if (result == 1 && global_fresh && fov::settings.periphery_pass && fov::settings.relight > 0.0f) {
       if (every > 1) reset = 1;
       result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
     }

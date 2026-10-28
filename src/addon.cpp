@@ -477,7 +477,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   if (f.split) {
     changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
     changed |= SliderWithReset("Tone blur", &f.grade_blur, 0.0f, 16.0f, "%.1f px", 1.0f);
-    changed |= SliderWithReset("Relighting kept", &f.relight, 0.0f, 1.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Relighting kept (0 = details only)", &f.relight, 0.0f, 1.0f, "%.2f", 1.0f);
     bool darken = f.relight_mode != 0;
     if (ImGui::Checkbox("Relighting may only darken (no colour; ambient occlusion-like)", &darken)) {
       f.relight_mode = darken ? 1 : 0;
