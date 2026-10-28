@@ -29,6 +29,7 @@ cbuffer EngineConstants : register(b0)
     uint g_valid;      // the region has a history (last frame ran it, no reset)
     float g_blend;     // the learned cap on the blend, times the user's history strength (0 = none)
     float g_motion;    // scale on the motion the history is reprojected along (1 = as given, 0 = none)
+    float g_intensity; // NR intensity: blend from the frame (0) to the answer (1); the history keeps the answer
 };
 
 // Reflect once about the last pixel, then clamp what is still outside.

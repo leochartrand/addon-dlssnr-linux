@@ -9,6 +9,8 @@
 // while the engine is on.
 //
 // Per region and frame, NVIDIA's temporal loop (engine_common.hlsli):
+//   engine base: the per-pixel input block -- fresh noise (the frame number is the seed, as the library
+//               counts frames) and the live controls (tone, structure, skin, style) -- (engine_base)
 //   engine in:  the atlas region -> the engine's frame and history inputs (the previous answer,
 //               reprojected)                                                      (engine_in)
 //   engine:     the recorded launches, a UAV barrier after each
@@ -33,6 +35,7 @@
 
 #include "../build/shaders/engine_in_dxil.h"
 #include "../build/shaders/engine_out_dxil.h"
+#include "../build/shaders/engine_base_dxil.h"
 
 namespace nr_engine {
 
@@ -48,7 +51,8 @@ constexpr uint32_t kNvCreateCubinEx = 0x3151211b;   // NvAPI_D3D12_CreateCubinCo
 constexpr uint32_t kNvLaunchCubin = 0x5c52bb86;     // NvAPI_D3D12_LaunchCubinShader
 
 constexpr uint32_t kRingSize = 8;       // frames of descriptors in flight
-constexpr uint32_t kConstants = 11;     // EngineConstants in engine_common.hlsli
+constexpr uint32_t kConstants = 12;     // EngineConstants in engine_common.hlsli
+constexpr uint32_t kBaseConstants = 10; // BaseConstants in engine_base.hlsl
 constexpr uint32_t kUses = 4;           // descriptor sets per frame: in and out of each region
 constexpr uint32_t kSlots = 5;          // t0-t2, u1-u2
 constexpr uint64_t kStaging = 64ull << 20;
@@ -86,6 +90,13 @@ struct Program {
   uint32_t field_w = 0, field_h = 0;
   bool temporal = false;         // takes a history and returns the head (H and T lines)
   float blend_scale = 0.0f;
+  // The per-pixel input block (B and M lines): rebuilt every frame by engine_base.
+  bool has_base = false;
+  uint32_t base_seg = 0, base_w = 0, base_h = 0;
+  uint64_t base_off = 0;
+  float noise_gain = 1.0f, constant = 1.0f;
+  std::vector<float> lift;       // [32][16]
+  ID3D12Resource* lift_buf = nullptr;
   std::vector<ID3D12Resource*> segs;
   uint64_t bytes = 0;            // device memory it holds
 
@@ -105,6 +116,8 @@ struct State {
   ID3D12RootSignature* root_sig = nullptr;
   ID3D12PipelineState* in_pso = nullptr;
   ID3D12PipelineState* out_pso = nullptr;
+  ID3D12RootSignature* base_sig = nullptr;   // engine_base: root UAV u0, root SRV t0, constants
+  ID3D12PipelineState* base_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t descriptor_size = 0;
 
@@ -203,10 +216,21 @@ inline bool ParseOne(Program& p, const std::string& dir, bool* missing) {
       s >> p.field_w >> p.field_h;
     } else if (tag == "T") {
       s >> p.blend_scale;
+    } else if (tag == "B") {
+      s >> p.base_seg >> p.base_off >> p.base_w >> p.base_h >> p.noise_gain >> p.constant;
+      p.has_base = true;
+    } else if (tag == "M") {
+      p.lift.resize(512);
+      for (float& v : p.lift) s >> v;
     }
   }
   const uint64_t plane = 4ull * p.field_w * p.field_h;
   const size_t nseg = p.seg_size.size();
+  if (!p.has_base || p.lift.size() != 512 || p.base_seg >= p.seg_size.size() || p.base_w != p.field_w ||
+      p.base_h != p.field_h) {
+    std::snprintf(g.error, sizeof(g.error), "%sprogram.txt has no input block (re-trace it)", dir.c_str());
+    return false;
+  }
   if (!p.temporal) {
     std::snprintf(g.error, sizeof(g.error), "%sprogram.txt has no history input (re-trace it)", dir.c_str());
     return false;
@@ -218,7 +242,7 @@ inline bool ParseOne(Program& p, const std::string& dir, bool* missing) {
   }
   // Only the segments a launch touches are created.
   p.seg_used.assign(nseg, false);
-  p.seg_used[p.in_seg] = p.seg_used[p.out_seg] = p.seg_used[p.hist_seg] = true;
+  p.seg_used[p.in_seg] = p.seg_used[p.out_seg] = p.seg_used[p.hist_seg] = p.seg_used[p.base_seg] = true;
   for (const Launch& L : p.launches) {
     bool ok = L.kernel < p.kernels.size();
     for (const Param& q : L.params)
@@ -319,6 +343,30 @@ inline bool CreatePipelines(ID3D12Device* device) {
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.in_pso)))) return false;
   pso.CS = {engine_out_dxil, sizeof(engine_out_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.out_pso)))) return false;
+  {
+    D3D12_ROOT_PARAMETER bp[3] = {};
+    bp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    bp[0].Descriptor = {0, 0};
+    bp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    bp[1].Descriptor = {0, 0};
+    bp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    bp[2].Constants = {0, 0, kBaseConstants};
+    D3D12_ROOT_SIGNATURE_DESC bd = {3, bp, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+    ID3DBlob* bb = nullptr;
+    ID3DBlob* be = nullptr;
+    if (FAILED(D3D12SerializeRootSignature(&bd, D3D_ROOT_SIGNATURE_VERSION_1, &bb, &be))) {
+      if (be != nullptr) be->Release();
+      return false;
+    }
+    const HRESULT bhr = device->CreateRootSignature(0, bb->GetBufferPointer(), bb->GetBufferSize(),
+                                                    IID_PPV_ARGS(&g.base_sig));
+    bb->Release();
+    if (FAILED(bhr)) return false;
+    D3D12_COMPUTE_PIPELINE_STATE_DESC bpso = {};
+    bpso.pRootSignature = g.base_sig;
+    bpso.CS = {engine_base_dxil, sizeof(engine_base_dxil)};
+    if (FAILED(device->CreateComputePipelineState(&bpso, IID_PPV_ARGS(&g.base_pso)))) return false;
+  }
   D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRingSize * kUses * kSlots,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g.heap)))) return false;
@@ -403,6 +451,24 @@ inline bool LoadProgram(ID3D12Device* device, Program& p, CreateCubinEx_t create
     b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     b.Transition = {p.segs[i], D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_DEST,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    up.list->ResourceBarrier(1, &b);
+    up.Submit();
+  }
+
+  // The lift, for engine_base.
+  {
+    const D3D12_RESOURCE_DESC d = BufferDesc(p.lift.size() * 4, false);
+    if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &d, D3D12_RESOURCE_STATE_COPY_DEST,
+                                               nullptr, IID_PPV_ARGS(&p.lift_buf)))) {
+      std::snprintf(g.error, sizeof(g.error), "%s input-block lift buffer", p.dir.c_str());
+      return false;
+    }
+    std::memcpy(up.map, p.lift.data(), p.lift.size() * 4);
+    up.list->CopyBufferRegion(p.lift_buf, 0, up.staging, 0, p.lift.size() * 4);
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition = {p.lift_buf, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
     up.list->ResourceBarrier(1, &b);
     up.Submit();
   }
@@ -595,12 +661,22 @@ inline bool BeginFrame(ID3D12GraphicsCommandList* cmd, ID3D12Resource* atlas, bo
   return true;
 }
 
+// NVIDIA's live controls for one region, as the library takes them (dlssnr Controls).
+struct Controls {
+  float intensity = 1.0f;        // blend from the frame (0) to the answer (1)
+  int style = 0;                 // 0..2
+  float tone = 1.0f;             // local tone: the broad (lighting) edit, 0..2
+  float structure = 1.0f;        // local structure: the fine-detail edit, 0..2
+  float skin = -1.0f;            // detail on skin, -1 = follow structure
+  bool auto_mask = true;         // skin / other split derived by the network
+};
+
 // One engine run on a region (x, y, w, h) of the atlas `src` with its motion vectors `motion` (both
 // NON_PIXEL_SHADER_RESOURCE, left so): the answer lands in the same region of `dst` (UNORDERED_ACCESS).
 // `history` scales the network's blend weight (1 = NVIDIA's, 0 = none).
 inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource* src, ID3D12Resource* motion,
                 ID3D12Resource* dst, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t frame,
-                float history, float motion_scale = 1.0f) {
+                float history, float motion_scale, const Controls& ctl) {
   if (!g.in_frame || region >= kRegions) return false;
   const Program& p = Prog(region);
   if (w > p.field_w || h > p.field_h || w == 0 || h == 0) return false;
@@ -610,9 +686,29 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   history = history < 0.0f ? 0.0f : (history > 1.0f ? 1.0f : history);
   const bool valid = !g.reset && g.ran_last[region];
   const float blend = p.blend_scale * history;
-  uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0, 0};
+  uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0, 0, 0};
   std::memcpy(&c[9], &blend, 4);
   std::memcpy(&c[10], &motion_scale, 4);
+  const float intensity = ctl.intensity < 0.0f ? 0.0f : (ctl.intensity > 1.0f ? 1.0f : ctl.intensity);
+  std::memcpy(&c[11], &intensity, 4);
+
+  // The input block: this frame's noise and the region's controls (Controls.conditioning()).
+  {
+    const float style = (float)ctl.style / 128.0f;
+    const float skin = ctl.skin < 0.0f ? ctl.structure : ctl.skin;
+    const float cond[5] = {style, ctl.tone, ctl.auto_mask ? 1.0f : ctl.structure, ctl.auto_mask ? skin : -1.0f,
+                           ctl.auto_mask ? ctl.structure : -1.0f};
+    uint32_t bc[kBaseConstants] = {p.base_w, p.base_h, frame};
+    std::memcpy(&bc[3], &p.noise_gain, 4);
+    std::memcpy(&bc[4], &p.constant, 4);
+    std::memcpy(&bc[5], cond, sizeof(cond));
+    cmd->SetComputeRootSignature(g.base_sig);
+    cmd->SetPipelineState(g.base_pso);
+    cmd->SetComputeRootUnorderedAccessView(0, p.Va(p.base_seg, p.base_off));
+    cmd->SetComputeRootShaderResourceView(1, p.lift_buf->GetGPUVirtualAddress());
+    cmd->SetComputeRoot32BitConstants(2, kBaseConstants, bc, 0);
+    cmd->Dispatch((p.base_w + 7) / 8, (p.base_h + 7) / 8, 1);
+  }
   ID3D12Resource* const prev = g.hist[g.flip];
   ID3D12Resource* const next = g.hist[g.flip ^ 1];
   const D3D12_GPU_VIRTUAL_ADDRESS hist_in = p.Va(p.hist_seg, p.hist_off);

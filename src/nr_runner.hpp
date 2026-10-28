@@ -808,9 +808,20 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
     WriteTuning(p, feature == s.feature2);
-    if (use_engine && nr_engine::Run(cmd, feature == s.feature2 ? nr_engine::kLow : nr_engine::kCrop, in_color,
-                                     in_motion, answer, x, y, w, h, frame, s.engine_history, s.engine_motion))
-      return 1;
+    if (use_engine) {
+      // NVIDIA's controls, per region as NGX gets them (WriteTuning).
+      const bool low = feature == s.feature2;
+      nr_engine::Controls ctl;
+      ctl.intensity = low ? s.split_global_intensity : s.intensity;
+      ctl.style = low ? s.split_global_style : s.style;
+      ctl.tone = low ? s.split_global_tone : s.local_tone;
+      ctl.structure = low ? s.split_global_structure : s.local_structure;
+      ctl.skin = s.skin_structure;
+      ctl.auto_mask = s.auto_mask != 0;
+      if (nr_engine::Run(cmd, low ? nr_engine::kLow : nr_engine::kCrop, in_color, in_motion, answer, x, y, w, h,
+                         frame, s.engine_history, s.engine_motion, ctl))
+        return 1;
+    }
     return s.evaluate(cmd, feature, s.caps);
   };
   LARGE_INTEGER model_t0;

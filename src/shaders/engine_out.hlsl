@@ -34,6 +34,6 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     neural = saturate(neural);
     float3 t = float3(TruncHalf(neural.r), TruncHalf(neural.g), TruncHalf(neural.b));
-    Answer[p] = float4(t, 1.0);
+    Answer[p] = float4(lerp(saturate(Proxy[p].rgb), t, g_intensity), 1.0);
     HistNext[p] = float4(t, 1.0);
 }
