@@ -53,7 +53,7 @@ constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploa
 enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
 constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the LUT), u0-u2
-constexpr uint32_t kConstants = 30;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kConstants = 32;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -89,6 +89,10 @@ struct Settings {
   // Split: the crop's position grid in full pixels, with a hold of 3/4 of it (0 or 1 = follow the
   // gaze pixel by pixel).
   int crop_snap = 32;
+  // Split: how much of the model's broad relighting (the low-resolution brightness and colour change)
+  // reaches the picture, and whether it may only darken, without colour (0), like ambient occlusion.
+  float relight = 1.0f;
+  int relight_mode = 0;
 };
 
 inline Settings settings;
@@ -770,6 +774,8 @@ inline void SplitConstants(uint32_t* c, const SplitLayout& l, uint32_t full_w, u
   std::memcpy(&c[24], &feather, 4);
   c[25] = 0;
   std::memcpy(&c[26], &settings.grade_blur, 4);
+  std::memcpy(&c[30], &settings.relight, 4);
+  c[31] = settings.relight_mode != 0 ? 1u : 0u;
 }
 
 // The crop pass's objects: its root signature ([0] root SRV t0 gaze, [1] root UAV u0 state,

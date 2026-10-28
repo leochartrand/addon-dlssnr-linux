@@ -1,5 +1,5 @@
 // Split foveation: the full-size answer. Outside the crop: the input plus the whole-frame pass's
-// offset -- the low-res answer upsampled, with the input's own finer detail on top. Inside: the
+// offset -- the low-res answer upsampled edge-aware, with the input's own finer detail on top. Inside: the
 // crop's answer with its coarse part swapped for the low-res answer's, blended in over g_feather
 // pixels from the crop's edge.
 // g_pass_debug shows one pass alone, as the model saw and answered it: 1-3 the fovea crop (what it
@@ -21,9 +21,38 @@ float4 PassView(uint view, float4 seen, float4 answer)
     return float4(saturate(abs(answer.rgb - seen.rgb) * 20.0), 1.0);
 }
 
-float3 Offset(Texture2D<float4> t, float2 uv)
+float Brightness(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
+// The low-resolution offsets at a full-resolution pixel, stretched edge-aware: the 4x4 low-res texels
+// around it, each weighted by distance and by how close its input brightness (the low-res frame the
+// model saw) is to this pixel's own, so a change made on one side of an edge (a building against the
+// sky, a character against a wall) stays on that side instead of glowing across it.
+void Offsets(float2 uv, float3 base, bool fovea, out float3 periphery, out float3 crop)
 {
-    return t.SampleLevel(Linear, uv, 0).rgb;
+    float2 pos = uv * float2(g_low_w, g_low_h) - 0.5;
+    int2 i0 = (int2)floor(pos);
+    int2 last = int2(g_low_w - 1, g_low_h - 1);
+    float y = Brightness(base);
+    float3 sp = 0, sc = 0;
+    float wsum = 0;
+    [unroll] for (int dy = -1; dy <= 2; ++dy)
+    {
+        [unroll] for (int dx = -1; dx <= 2; ++dx)
+        {
+            int2 q = clamp(i0 + int2(dx, dy), int2(0, 0), last);
+            float2 d = pos - (float2)(i0 + int2(dx, dy));
+            float g = Brightness(InputAtlas[uint2(g_low_x + q.x, q.y)].rgb) - y;
+            // spatial: Gaussian, sigma 0.75 texels; range: sigma 0.04 in display brightness. The floor
+            // keeps a pixel finer than the low-res grid (a flagpole) on its neighbourhood's offset.
+            float w = exp(-dot(d, d) * 0.889) * (exp(-g * g * 312.5) + 1e-3);
+            sp += w * OffsetPeriphery[q].rgb;
+            if (fovea)
+                sc += w * OffsetFovea[q].rgb;
+            wsum += w;
+        }
+    }
+    periphery = sp / wsum;
+    crop = sc / wsum;
 }
 
 [numthreads(8, 8, 1)]
@@ -49,17 +78,20 @@ void main(uint3 id : SV_DispatchThreadID)
                             : float4(base.rgb * 0.3, base.a);
         return;
     }
-    float4 result = float4(saturate(base.rgb + Offset(OffsetPeriphery, uv)), base.a);
-
     int2 c = (int2)id.xy - int2(CropOrigin());
     int2 size = int2(g_crop_w, g_crop_h);
-    if (all(c >= 0) && all(c < size))
+    bool in_crop = all(c >= 0) && all(c < size);
+    float3 off_periphery, off_fovea;
+    Offsets(uv, base.rgb, in_crop, off_periphery, off_fovea);
+    float4 result = float4(saturate(base.rgb + off_periphery), base.a);
+
+    if (in_crop)
     {
         float2 d2 = min((float2)c + 0.5, (float2)(size - c) - 0.5);
         float d = min(d2.x, d2.y);
         float w = g_feather > 0.0 ? smoothstep(0.0, g_feather, d) : 1.0;
         float4 a = Answer[uint2(c)];
-        float4 fovea = float4(saturate(a.rgb + Offset(OffsetFovea, uv)), a.a);
+        float4 fovea = float4(saturate(a.rgb + off_fovea), a.a);
         result = lerp(result, fovea, w);
     }
     Out[id.xy] = result;

@@ -7,7 +7,8 @@
 // model's frame-to-frame noise -- it re-draws its detail from fresh noise every frame -- and small
 // animation do not flicker it; where the input really changes, the tone follows at once. On frames
 // where the whole-frame pass did not run, the carried history is used alone. The history keeps the
-// tone in rgb and the blurred input's luma in a.
+// tone in rgb and the blurred input's luma in a. The offsets the expand adds carry that tone limited by
+// the relight settings.
 #include "fov_common.hlsli"
 
 Texture2D<float4> InGlobal : register(t0);
@@ -30,7 +31,7 @@ void main(uint3 id : SV_DispatchThreadID)
     int2 step = g_blur_axis == 0 ? int2(1, 0) : int2(0, 1);
     int2 last = int2(g_low_w - 1, g_low_h - 1);
     int r = (int)ceil(g_sigma * 3.0);
-    float k2 = -0.5 / (g_sigma * g_sigma);
+    float k2 = g_sigma > 0.0 ? -0.5 / (g_sigma * g_sigma) : 0.0;   // 0: no blur (r = 0)
     float4 gl = 0, in_ = 0, cr = 0;
     float wsum = 0;
     for (int k = -r; k <= r; ++k)
@@ -72,8 +73,12 @@ void main(uint3 id : SV_DispatchThreadID)
                 a = 1.0;
             tone = lerp(hist.rgb, gl.rgb, a);
         }
-        OutA[id.xy] = float4(tone, 0.0);
-        OutB[id.xy] = float4(tone - cr.rgb, 0.0);
+        // The history keeps the model's own tone; the picture gets it limited (g_relight, g_relight_mode).
+        float3 shown = tone * g_relight;
+        if (g_relight_mode == 1)
+            shown = min(Brightness(shown), 0.0).xxx;
+        OutA[id.xy] = float4(shown, 0.0);
+        OutB[id.xy] = float4(shown - cr.rgb, 0.0);
         OutC[id.xy] = float4(tone, Brightness(in_.rgb));
     }
 }
