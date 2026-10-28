@@ -559,7 +559,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
     nr_runner::poll_live = PollLiveSettings;
     reshade::register_event<reshade::addon_event::present>(OnPresent);
-      reshade::register_overlay("DLSSNR Linux", OnDrawOverlay);
+      reshade::register_overlay(nullptr, OnDrawOverlay);   // the settings, in this add-on's entry on the Add-ons tab
       ngx_probe::TryInstall();  // in case NGX is already resident
       break;
     case DLL_PROCESS_DETACH:
@@ -572,7 +572,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       if (lp_reserved != nullptr) break;
       ngx_probe::Uninstall();
       nr_runner::Shutdown();
-      reshade::unregister_overlay("DLSSNR Linux", OnDrawOverlay);
+      reshade::unregister_overlay(nullptr, OnDrawOverlay);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::unregister_addon(h_module);
