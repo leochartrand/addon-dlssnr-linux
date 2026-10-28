@@ -85,6 +85,9 @@ struct Settings {
   // Split with two calls on our NR engine (nr_engine): its programs' fields, which the regions snap to
   // (0 = NGX, the regions follow the settings above). Set by the runner each frame.
   uint32_t engine_crop_w = 0, engine_crop_h = 0, engine_low_w = 0, engine_low_h = 0;
+  // Split: the crop's position grid in full pixels, with a hold of 3/4 of it (0 or 1 = follow the
+  // gaze pixel by pixel).
+  int crop_snap = 32;
 };
 
 inline Settings settings;
@@ -752,12 +755,21 @@ inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, 
   // The crop's motion vectors carry its move, so a jump needs no reset: what enters the crop is
   // simply new to it.
   g.reset = false;
-  auto origin = [](float centre, uint32_t size, uint32_t full) {
-    const long o = std::lround(centre - 0.5f * (float)size);
+  // The crop moves on a grid, and only once the gaze has left the current position by more than
+  // the hold distance: a crop that follows the tracker's jitter pixel by pixel shifts the model's
+  // windows over the scene every frame, and its answer shimmers with them.
+  const int snap = settings.crop_snap;
+  auto origin = [snap](float centre, uint32_t size, uint32_t full, int prev) {
+    long o = std::lround(centre - 0.5f * (float)size);
+    if (snap > 1) {
+      if (prev >= 0 && std::labs(o - prev) <= (long)snap * 3 / 4) o = prev;
+      else o = (o + snap / 2) / snap * snap;
+    }
     return (uint32_t)(o < 0 ? 0 : (o > (long)(full - size) ? (long)(full - size) : o));
   };
-  g.crop_x = origin(g.centre_x, l.crop_w, full_w);
-  g.crop_y = origin(g.centre_y, l.crop_h, full_h);
+  const bool same_layout = g.x.full == full_w && g.y.full == full_h && g.x.work == l.work_w && g.y.work == l.work_h;
+  g.crop_x = origin(g.centre_x, l.crop_w, full_w, same_layout ? g.prev_crop_x : -1);
+  g.crop_y = origin(g.centre_y, l.crop_h, full_h, same_layout ? g.prev_crop_y : -1);
   if (g.prev_crop_x < 0 || g.x.full != full_w || g.y.full != full_h || g.x.work != l.work_w ||
       g.y.work != l.work_h) {
     g.prev_crop_x = (int)g.crop_x;   // first frame, or a new layout: start the history over

@@ -154,6 +154,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::get_config_value(nullptr, kConfigSection, "NREngine", s.engine);
+  reshade::get_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
   reshade::get_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
 
   // A hand-edited ini must not push values past what the overlay allows.
@@ -234,6 +235,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::set_config_value(nullptr, kConfigSection, "NREngine", s.engine);
+  reshade::set_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
   reshade::set_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
 }
 
@@ -324,6 +326,8 @@ void PollLiveSettings() {
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
+  f.crop_snap = LiveInt(path, "CropSnap", f.crop_snap);
+  if (f.crop_snap < 0 || f.crop_snap > 256) f.crop_snap = 32;
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
