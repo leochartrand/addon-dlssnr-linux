@@ -153,6 +153,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
+  reshade::get_config_value(nullptr, kConfigSection, "NREngine", s.engine);
 
   // A hand-edited ini must not push values past what the overlay allows.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -231,6 +232,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
+  reshade::set_config_value(nullptr, kConfigSection, "NREngine", s.engine);
 }
 
 // --- live settings from another process ----------------------------------
@@ -319,6 +321,7 @@ void PollLiveSettings() {
   f.fovea_debug = LiveInt(path, "FoveaDebugView", f.fovea_debug);
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
+  s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
@@ -463,6 +466,10 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     if (f.split_calls == 2) {
       // Each pass is its own feature: its own network and hand, and a debug view of it alone.
       static const char kPassViews[] = "Off\0What the model sees\0Model answer\0Difference x20\0";
+      changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
+      if (s.engine)
+        ImGui::Text("Engine: %s -- both regions at its %ux%u field; NGX runs until it is ready",
+                    nr_engine::StatusText(), nr_engine::g.prog.field_w, nr_engine::g.prog.field_h);
       ImGui::TextUnformatted("Fovea pass (full-res crop): the model settings above");
       changed |= ImGui::Combo("Fovea pass debug view", &f.fovea_debug, kPassViews);
       ImGui::TextUnformatted("Periphery pass (low-res whole frame)");

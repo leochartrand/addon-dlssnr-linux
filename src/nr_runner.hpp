@@ -40,6 +40,7 @@
 #include "nr_compose.hpp"
 #include "fov.hpp"
 #include "diag.hpp"
+#include "engine_runtime.hpp"
 
 #pragma comment(lib, "bcrypt")   // SHA-256 of the model DLL
 #pragma comment(lib, "version")  // its file-version resource
@@ -175,6 +176,9 @@ struct State {
   float split_global_structure = 1.0f;
   float split_global_tone = 1.0f;
   int split_global_style = 0;
+  // Split in two calls: run both regions on our own engine (engine_runtime.hpp) instead of the NGX
+  // features, which stay built for an instant A/B and as the fallback while the engine loads.
+  bool engine = false;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -211,6 +215,9 @@ inline void UpdateFrameSize() {
                       (s.render_w != s.out_w || s.render_h != s.out_h);
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
+  const bool engine = s.engine && split && fov::settings.split_calls == 2;
+  fov::settings.engine_w = engine ? nr_engine::FieldW() : 0;
+  fov::settings.engine_h = engine ? nr_engine::FieldH() : 0;
 }
 
 // Model calls per frame the current settings ask for: 2 for split foveation in separate calls.
@@ -738,6 +745,9 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   void* p = s.caps;
   const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
   const uint32_t n = ++s.eval_count;
+  // Our engine takes the split calls once it has loaded and the regions are at its field.
+  const bool use_engine = foveated && split && s.feature_calls == 2 && fov::settings.engine_w != 0 &&
+                          nr_engine::Ready(cmd);
   // One model call on a region of the inputs (the guides' region scales with them).
   auto call = [&](void* feature, unsigned x, unsigned y, unsigned w, unsigned h) {
     const unsigned gx = x * guide_w / s.feature_w, gy = y * guide_h / s.feature_h;
@@ -773,6 +783,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
     WriteTuning(p, feature == s.feature2);
+    if (use_engine && nr_engine::Run(cmd, in_color, answer, x, y, w, h, frame, feature == s.feature2 ? 1 : 0))
+      return 1;
     return s.evaluate(cmd, feature, s.caps);
   };
   int result;
@@ -794,8 +806,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   }
 
   if (n <= kFullLogs || n % kHeartbeatEvery == 0) {
-    ngx_probe::Logf("nr-fwd: EvaluateFeature #%u => 0x%x (%s)", n, (unsigned)result,
-                    ResultName(result));
+    ngx_probe::Logf("nr-fwd: %s #%u => 0x%x (%s)", use_engine ? "engine" : "EvaluateFeature", n,
+                    (unsigned)result, ResultName(result));
   }
 
   if (result != 1) {
