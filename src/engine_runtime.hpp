@@ -661,6 +661,9 @@ inline bool BeginFrame(ID3D12GraphicsCommandList* cmd, ID3D12Resource* atlas, bo
   return true;
 }
 
+// Set by the runner: a GPU timestamp after a region's input block (net = false) and after its network (true).
+inline void (*stamp)(ID3D12GraphicsCommandList*, uint32_t region, bool net) = nullptr;
+
 // NVIDIA's live controls for one region, as the library takes them (dlssnr Controls).
 struct Controls {
   float intensity = 1.0f;        // blend from the frame (0) to the answer (1)
@@ -708,6 +711,7 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
     cmd->SetComputeRootShaderResourceView(1, p.lift_buf->GetGPUVirtualAddress());
     cmd->SetComputeRoot32BitConstants(2, kBaseConstants, bc, 0);
     cmd->Dispatch((p.base_w + 7) / 8, (p.base_h + 7) / 8, 1);
+    if (stamp != nullptr) stamp(cmd, region, false);
   }
   ID3D12Resource* const prev = g.hist[g.flip];
   ID3D12Resource* const next = g.hist[g.flip ^ 1];
@@ -733,6 +737,7 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
        p.Va(p.out_seg, p.out_off), hist_in, c);
   cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
   cmd->ResourceBarrier(1, &all);
+  if (stamp != nullptr) stamp(cmd, region, true);
   device->Release();
   g.ran_now[region] = true;
   return true;

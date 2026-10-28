@@ -183,6 +183,7 @@ struct State {
   // library does it, 0 = single frames).
   float engine_history = 1.0f;
   float engine_motion = 1.0f;   // scale on the motion the engine's history follows (diagnostic)
+  uint32_t stamped = 0;         // diag stamps the engine marked this frame (bit per diag::Stamp)
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -766,6 +767,14 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   }
 
   diag::Mark(cmd, diag::kSqueeze);
+  s.stamped = 0;
+  nr_engine::stamp = [](ID3D12GraphicsCommandList* c, uint32_t region, bool net) {
+    // The low region's network ends at the model's own stamp.
+    if (region == nr_engine::kLow && net) return;
+    const diag::Stamp st = region == nr_engine::kCrop ? (net ? diag::kCropNet : diag::kCropBase) : diag::kLowBase;
+    diag::Mark(c, st);
+    s.stamped |= 1u << st;
+  };
 
   void* p = s.caps;
   const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
@@ -870,6 +879,9 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     return false;
   }
   s.fail_streak = 0;
+  // The per-region stamps a region that did not run on our engine left out, then the model's end.
+  for (diag::Stamp st : {diag::kCropBase, diag::kCropNet, diag::kLowBase})
+    if ((s.stamped & (1u << st)) == 0) diag::Mark(cmd, st);
   diag::Mark(cmd, diag::kModel);
   if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
   else if (foveated) fov::Expand(cmd, s.output, frame);

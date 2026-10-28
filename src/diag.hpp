@@ -22,8 +22,11 @@
 namespace diag {
 
 constexpr uint32_t kRing = 16;   // frames a timestamp slot or a dump waits before it is read back
-enum Stamp : uint32_t { kStart, kEncode, kSqueeze, kModel, kExpand, kResolve, kStamps };
-constexpr const char* kStageNames[kStamps - 1] = {"encode", "squeeze", "model", "expand", "resolve"};
+// The model's span is split per region when our engine runs it (its input block, then its network); with
+// NGX, or a region that did not run, those stamps fall at the end of the model.
+enum Stamp : uint32_t { kStart, kEncode, kSqueeze, kCropBase, kCropNet, kLowBase, kModel, kExpand, kResolve, kStamps };
+constexpr const char* kStageNames[kStamps - 1] = {"encode", "squeeze", "crop-noise", "crop-net", "low-noise",
+                                                  "low-net", "expand", "resolve"};
 constexpr uint32_t kReportEvery = 300;
 
 // Ticks per second of the queue's timestamps, from the present hook (0 until known).
