@@ -401,141 +401,165 @@ bool SliderWithReset(const char* label, float* value, float min, float max, cons
 
 // The settings panel, under ReShade's Add-ons tab. Compose controls apply live; the model's own
 // settings are read once at feature creation, so they take a rebuild (the Apply button).
+// The settings page, in this add-on's entry on ReShade's Add-ons tab. Sections, top to bottom: what the
+// pass is doing now, the final picture, NVIDIA's model controls, the pipeline around the model, foveation
+// (the crop, the periphery, how they are blended, the gaze) and every debug view in one place. Controls a
+// mode does not use are not shown.
 void OnDrawOverlay(reshade::api::effect_runtime*) {
   auto& s = nr_runner::s;
+  auto& f = fov::settings;
+  bool changed = false;
+  const bool split = f.enabled && f.split;
+  const bool two_calls = split && f.split_calls == 2;
+  const bool engine_sizes = two_calls && s.engine && f.engine_crop_w != 0;   // the engine fixes both regions
 
   bool enabled = nr_runner::IsEnabled();
   if (ImGui::Checkbox("Enable Neural Rendering (F10)", &enabled)) nr_runner::SetEnabled(enabled);
-
-  bool changed = false;
-  changed |= SliderWithReset("Detail strength", &s.transfer, 0.0f, 1.5f, "%.2f", 1.0f);
-  changed |= SliderWithReset("Colour strength", &s.colour_strength, 0.0f, 1.0f, "%.2f", 0.0f);
-  changed |= SliderWithReset("Highlight guard", &s.max_ratio, 1.0f, 8.0f, "%.1fx", 2.0f);
-  changed |= SliderWithReset("White point scale", &s.wp_scale, 0.1f, 4.0f, "%.2f", 1.0f);
-  if (s.wp_ema > 0.0f) {
-    ImGui::Text("Measured white point: %.4f", s.wp_ema);
-  } else {
-    ImGui::TextUnformatted("Measured white point: (measuring...)");
-  }
-
-  ImGui::Combo("Debug view", &s.debug_view,
-               "Off\0What the model sees\0Model answer\0Difference x20\0Fovea map (foveated NR)\0");
-
-  ImGui::Separator();
-  ImGui::TextUnformatted("Model settings (need Apply, rebuilds the feature)");
-  // The three DLSSNR intensities, as in the RenoDX DLSS5 addon. NR intensity is the model's overall
-  // hand; Structure intensity drives the fine detail it synthesises; Global intensity shapes the
-  // broad local contrast/tone. All default to 1.0 (the model's neutral).
-  changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 2.0f, "%.2f", 1.0f);
-  changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 2.0f, "%.2f", 1.0f);
-  changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 2.0f, "%.2f", 1.0f);
-  changed |= ImGui::SliderInt("Preset", &s.preset, 0, 7);
-  ImGui::SameLine();
-  ImGui::PushID("preset-reset");
-  if (ImGui::SmallButton("reset")) {
-    s.preset = 0;
-    changed = true;
-  }
-  ImGui::PopID();
-
-  // The model's own processing profiles (DLSSNR.Style). Names from community testing via
-  // OptiScaler_DLSSNR -- NVIDIA ships none. Default boosts local contrast hardest and can look
-  // stylised; Natural is the same detail with a gentler hand; Cinematic tones down the shine for
-  // a film-like look.
-  if (s.style > 2) s.style = 2;
-  changed |= ImGui::Combo("Style", &s.style, "Default (standard)\0Natural\0Cinematic\0");
-  ImGui::SameLine();
-  ImGui::PushID("style-reset");
-  if (ImGui::SmallButton("reset")) {
-    s.style = 0;
-    changed = true;
-  }
-  ImGui::PopID();
-
-  changed |= SliderWithReset("Skin detail (-1 = structure)", &s.skin_structure, -1.0f, 2.0f, "%.2f", -1.0f);
-  if (ImGui::TreeNode("NVIDIA's advanced options")) {
-    // NGX's own parameters; -1 (or 0 for the ratio) leaves the library's default. Our engine reads the skin
-    // mask; the others reach NGX only.
-    changed |= ImGui::SliderInt("Skin mask (-1 default, 0 off, 1 on)", &s.auto_mask, -1, 1);
-    changed |= ImGui::SliderInt("UI correction (-1 default, NGX only)", &s.ui_correction, -1, 1);
-    changed |= ImGui::SliderInt("Mask blend mode (-1 default, NGX only)", &s.mask_blend_mode, -1, 3);
-    changed |= SliderWithReset("Global tone strength (-1 unset, NGX only)", &s.global_tone, -1.0f, 2.0f, "%.2f", -1.0f);
-    changed |= SliderWithReset("Scaling ratio (0 unset, NGX only)", &s.scaling_ratio, 0.0f, 4.0f, "%.2f", 0.0f);
-    ImGui::TreePop();
-  }
-
-  if (ImGui::Button("Apply model settings")) nr_runner::ApplyModelSettings();
-
-  // Only differs from the default when the game's DLSS really upscales (input smaller than output).
-  changed |= ImGui::Checkbox("Run before the upscale (the model works at render resolution)",
-                             &s.before_upscale);
-
-  // Geometry changes rebuild the feature at its new size by themselves (the next frame); the
-  // gaze controls apply live.
-  ImGui::Separator();
-  ImGui::TextUnformatted("Foveation (the model runs on a squeezed frame)");
-  auto& f = fov::settings;
-  changed |= ImGui::Checkbox("Anti-aliasing (DLAA) on the frame before the pass", &nr_runner::s.dlaa);
-  changed |= ImGui::Checkbox("Foveated NR", &f.enabled);
-  changed |= SliderWithReset("Fovea width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
-  changed |= SliderWithReset("Fovea height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
-  changed |= SliderWithReset("Falloff", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
-  changed |= SliderWithReset("Edge resolution", &f.edge, 0.25f, 1.0f, "%.2f", 0.50f);
-  changed |= ImGui::Checkbox("Split: full-res crop + low-res frame for the tone", &f.split);
-  if (f.split) {
-    changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
-    changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
-    bool two = f.split_calls == 2;
-    if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
-      f.split_calls = two ? 2 : 1;
-      changed = true;
-    }
-    changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
-    changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
-    changed |= ImGui::SliderInt("Crop snap (px; 0-1 = follow the gaze exactly)", &f.crop_snap, 0, 256);
-    changed |= ImGui::SliderInt("Whole-frame pass every", &f.global_every, 1, 4, "%d frames");
-    if (f.split_calls == 2) {
-      // Each pass is its own feature: its own network and hand, and a debug view of it alone.
-      static const char kPassViews[] = "Off\0What the model sees\0Model answer\0Difference x20\0";
-      changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
-      if (s.engine)
-        ImGui::Text("Engine: %s -- regions at %ux%u and %ux%u; NGX runs until it is ready", nr_engine::StatusText(),
-                    nr_engine::g.progs[0].field_w, nr_engine::g.progs[0].field_h,
-                    nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_w,
-                    nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
-      if (s.engine)
-        changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
-      ImGui::TextUnformatted("Fovea pass (full-res crop): the model settings above");
-      changed |= ImGui::Combo("Fovea pass debug view", &f.fovea_debug, kPassViews);
-      ImGui::TextUnformatted("Periphery pass (low-res whole frame)");
-      changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
-                                 &f.periphery_pass);
-      changed |= ImGui::Combo("Periphery pass debug view", &f.periphery_debug, kPassViews);
-      bool model = false;
-      model |= SliderWithReset("Periphery NR intensity", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);
-      model |= SliderWithReset("Periphery structure intensity", &s.split_global_structure, 0.0f, 2.0f, "%.2f", 1.0f);
-      model |= SliderWithReset("Periphery global intensity", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
-      model |= ImGui::SliderInt("Periphery preset", &s.split_global_preset, -1, 7, s.split_global_preset < 0 ? "same as fovea" : "%d");
-      model |= ImGui::Combo("Periphery style", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
-      model |= SliderWithReset("Periphery skin detail (-1 = its structure)", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
-      if (model) nr_runner::ApplyModelSettings();
-      changed |= model;
-    }
-  }
-  changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
-  if (f.gaze_source == 1) {
-    changed |= ImGui::InputInt("Gaze UDP port", &f.gaze_port);
-    changed |= SliderWithReset("Gaze smoothing", &f.gaze_smooth_ms, 0.0f, 200.0f, "%.0f ms", 30.0f);
-    changed |= SliderWithReset("Gaze jump that resets the history", &f.jump_reset, 0.02f, 2.0f, "%.2f of the frame", 0.20f);
-    float gx = 0.0f, gy = 0.0f;
-    if (fov::GazeLatest(&gx, &gy)) ImGui::Text("Gaze: %.3f, %.3f", gx, gy);
-    else ImGui::TextUnformatted("Gaze: no packets in the last 0.5 s (centre used)");
-  }
   if (s.frame_w != 0 && s.frame_h != 0) {
     uint32_t fw = 0, fh = 0;
     nr_runner::FeatureSize(&fw, &fh);
-    ImGui::Text("Model works on %ux%u of %ux%u (%.0f%% of the pixels)", fw, fh, s.frame_w, s.frame_h,
-                100.0 * fw * fh / ((double)s.frame_w * s.frame_h));
+    ImGui::TextDisabled("The model works on %ux%u of a %ux%u frame (%.0f%% of the pixels)%s", fw, fh, s.frame_w,
+                        s.frame_h, 100.0 * fw * fh / ((double)s.frame_w * s.frame_h),
+                        two_calls && s.engine ? "; our engine" : "; NVIDIA's NGX");
+  }
+
+  if (ImGui::CollapsingHeader("Picture", ImGuiTreeNodeFlags_DefaultOpen)) {
+    changed |= SliderWithReset("Detail strength", &s.transfer, 0.0f, 1.5f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Colour strength", &s.colour_strength, 0.0f, 1.0f, "%.2f", 0.0f);
+    changed |= SliderWithReset("Highlight guard", &s.max_ratio, 1.0f, 8.0f, "%.1fx", 2.0f);
+    changed |= SliderWithReset("White point scale", &s.wp_scale, 0.1f, 4.0f, "%.2f", 1.0f);
+    if (s.wp_ema > 0.0f) ImGui::TextDisabled("Measured white point: %.4f", s.wp_ema);
+    else ImGui::TextDisabled("Measured white point: (measuring...)");
+  }
+
+  if (ImGui::CollapsingHeader(two_calls ? "Model: the crop (NVIDIA's controls)" : "Model (NVIDIA's controls)",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    // NR intensity is the model's overall hand; Structure intensity the fine detail it synthesises; Global
+    // intensity the broad tone (its relighting). Style: NVIDIA's processing profiles (names from community
+    // testing via OptiScaler_DLSSNR). Our engine reads these live; NGX only at a rebuild (Apply).
+    changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 2.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 2.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 2.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Skin detail (-1 = structure)", &s.skin_structure, -1.0f, 2.0f, "%.2f", -1.0f);
+    if (s.style > 2) s.style = 2;
+    changed |= ImGui::Combo("Style", &s.style, "Default (standard)\0Natural\0Cinematic\0");
+    changed |= ImGui::SliderInt("Preset (NGX only)", &s.preset, 0, 7);
+    if (ImGui::TreeNode("NVIDIA's advanced options")) {
+      // -1 (or 0 for the ratio) leaves the library's default. Our engine reads the skin mask; the rest is NGX's.
+      changed |= ImGui::SliderInt("Skin mask (-1 default, 0 off, 1 on)", &s.auto_mask, -1, 1);
+      changed |= ImGui::SliderInt("UI correction (-1 default, NGX only)", &s.ui_correction, -1, 1);
+      changed |= ImGui::SliderInt("Mask blend mode (-1 default, NGX only)", &s.mask_blend_mode, -1, 3);
+      changed |= SliderWithReset("Global tone strength (-1 unset, NGX only)", &s.global_tone, -1.0f, 2.0f, "%.2f", -1.0f);
+      changed |= SliderWithReset("Scaling ratio (0 unset, NGX only)", &s.scaling_ratio, 0.0f, 4.0f, "%.2f", 0.0f);
+      ImGui::TreePop();
+    }
+    if (ImGui::Button("Apply to NGX (rebuild)")) nr_runner::ApplyModelSettings();
+    ImGui::SameLine();
+    ImGui::TextDisabled("our engine applies them live");
+  }
+
+  if (ImGui::CollapsingHeader("Pipeline")) {
+    changed |= ImGui::Checkbox("Anti-aliasing (DLAA) on the frame before the pass", &s.dlaa);
+    // Only differs from the default when the game's DLSS really upscales (input smaller than output).
+    changed |= ImGui::Checkbox("Run before the upscale (the model works at render resolution)", &s.before_upscale);
+    if (two_calls) {
+      changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
+      if (s.engine) {
+        ImGui::TextDisabled("Engine: %s -- crop %ux%u, periphery %ux%u; NGX runs until it is ready",
+                            nr_engine::StatusText(), nr_engine::g.progs[0].field_w, nr_engine::g.progs[0].field_h,
+                            nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_w,
+                            nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
+        changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
+      }
+    } else {
+      ImGui::TextDisabled("Our engine runs the split foveation in two calls only.");
+    }
+  }
+
+  if (ImGui::CollapsingHeader("Foveation", ImGuiTreeNodeFlags_DefaultOpen)) {
+    changed |= ImGui::Checkbox("Foveated NR", &f.enabled);
+    if (f.enabled) {
+      int mode = f.split ? 1 : 0;
+      ImGui::SameLine();
+      if (ImGui::RadioButton("Squeezed frame", &mode, 0)) { f.split = false; changed = true; }
+      ImGui::SameLine();
+      if (ImGui::RadioButton("Crop + low-res frame", &mode, 1)) { f.split = true; changed = true; }
+
+      if (!f.split) {
+        changed |= SliderWithReset("Fovea width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
+        changed |= SliderWithReset("Fovea height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
+        changed |= SliderWithReset("Falloff", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
+        changed |= SliderWithReset("Edge resolution", &f.edge, 0.25f, 1.0f, "%.2f", 0.50f);
+      } else {
+        ImGui::SeparatorText("The crop (full resolution, around the gaze)");
+        if (engine_sizes) {
+          ImGui::TextDisabled("%ux%u: the engine program's size", f.engine_crop_w, f.engine_crop_h);
+        } else {
+          changed |= SliderWithReset("Crop width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
+          changed |= SliderWithReset("Crop height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
+        }
+        changed |= ImGui::SliderInt("Crop snap", &f.crop_snap, 0, 256, f.crop_snap <= 1 ? "follows the gaze exactly" : "%d px");
+        changed |= SliderWithReset("Edge blend", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
+
+        ImGui::SeparatorText("The periphery (the whole frame, low resolution)");
+        if (two_calls) {
+          changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
+                                     &f.periphery_pass);
+        }
+        if (engine_sizes) ImGui::TextDisabled("%ux%u: the engine program's size", f.engine_low_w, f.engine_low_h);
+        else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
+        if (two_calls && f.periphery_pass) {
+          changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
+          bool model = false;
+          if (ImGui::TreeNode("Its model (NVIDIA's controls)")) {
+            model |= SliderWithReset("NR intensity##periphery", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);
+            model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 2.0f, "%.2f", 1.0f);
+            model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
+            model |= SliderWithReset("Skin detail (-1 = its structure)##periphery", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
+            model |= ImGui::Combo("Style##periphery", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
+            model |= ImGui::SliderInt("Preset (NGX only)##periphery", &s.split_global_preset, -1, 7,
+                                      s.split_global_preset < 0 ? "same as the crop" : "%d");
+            ImGui::TreePop();
+          }
+          if (model) nr_runner::ApplyModelSettings();
+          changed |= model;
+        }
+
+        ImGui::SeparatorText("How the two are combined");
+        bool two = f.split_calls == 2;
+        if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
+          f.split_calls = two ? 2 : 1;
+          changed = true;
+        }
+        changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
+        changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
+        changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
+      }
+
+      ImGui::SeparatorText("Gaze");
+      changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
+      if (f.gaze_source == 1) {
+        changed |= ImGui::InputInt("Gaze UDP port", &f.gaze_port);
+        changed |= SliderWithReset("Gaze smoothing", &f.gaze_smooth_ms, 0.0f, 200.0f, "%.0f ms", 30.0f);
+        changed |= SliderWithReset("Jump that resets the history", &f.jump_reset, 0.02f, 2.0f, "%.2f of the frame", 0.20f);
+        float gx = 0.0f, gy = 0.0f;
+        if (fov::GazeLatest(&gx, &gy)) ImGui::TextDisabled("Gaze: %.3f, %.3f", gx, gy);
+        else ImGui::TextDisabled("Gaze: no packets in the last 0.5 s (centre used)");
+      }
+    }
+  }
+
+  if (ImGui::CollapsingHeader("Debug views")) {
+    ImGui::Combo("Final picture", &s.debug_view,
+                 "Off\0What the model sees\0Model answer\0Difference x20\0Fovea map (where the crop is)\0");
+    if (two_calls) {
+      // One pass alone, as the model saw and answered it; the crop's wins when both are set.
+      static const char kPassViews[] = "Off\0What the model sees\0Model answer\0Difference x20\0";
+      changed |= ImGui::Combo("The crop's pass", &f.fovea_debug, kPassViews);
+      changed |= ImGui::Combo("The periphery's pass", &f.periphery_debug, kPassViews);
+    } else {
+      ImGui::TextDisabled("Per-pass views need the split foveation in two calls.");
+    }
   }
 
   if (changed) SaveSettings();
