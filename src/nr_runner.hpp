@@ -710,6 +710,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   game_params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mv_scale_y);
   int reset = 0;
   game_params->Get(NVSDK_NGX_Parameter_Reset, &reset);
+  const bool game_reset = reset != 0;
   const bool depth_inverted =
       (s.create_flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
 
@@ -827,9 +828,14 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     model_ticks = now.QuadPart - model_t0.QuadPart;
   }
 
+  // History resets since the last heartbeat: the game's own and the foveation's (a new layout).
+  static uint32_t game_resets = 0, fov_resets = 0;
+  if (history_reset) ++(game_reset ? game_resets : fov_resets);
   if (n <= kFullLogs || n % kHeartbeatEvery == 0) {
-    ngx_probe::Logf("nr-fwd: %s #%u => 0x%x (%s)", use_engine ? "engine" : "EvaluateFeature", n,
-                    (unsigned)result, ResultName(result));
+    ngx_probe::Logf("nr-fwd: %s #%u => 0x%x (%s); history resets since last: %u game, %u foveation",
+                    use_engine ? "engine" : "EvaluateFeature", n, (unsigned)result, ResultName(result),
+                    game_resets, fov_resets);
+    game_resets = fov_resets = 0;
   }
 
   if (result != 1) {
