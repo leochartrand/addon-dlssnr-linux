@@ -186,6 +186,11 @@ struct State {
   // library does it, 0 = single frames).
   float engine_history = 1.0f;
   uint32_t stamped = 0;         // diag stamps the engine marked this frame (bit per diag::Stamp)
+  // NGX's NR features are released while our engine runs both split passes (they only stand by for it, and
+  // two of them on top of a 4K game overflowed a 10 GB card); the setup (sizes, textures) stays. They are
+  // created again when the engine stops covering. engine_frames counts its consecutive frames.
+  bool ngx_parked = false;
+  uint32_t engine_frames = 0;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -394,6 +399,7 @@ inline void TickGraveyard() {
 }
 
 inline void RetireFeature(const char* why) {
+  s.ngx_parked = false;
   if (s.feature == nullptr && s.output == nullptr) return;
   ngx_probe::Logf("nr-fwd: retiring NR feature (%s)", why);
   Bury(s.output, s.feature);
@@ -601,7 +607,7 @@ inline void ApplyModelSettings() {
 }
 
 inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
-  if (s.feature != nullptr) return true;
+  if (s.feature != nullptr || s.ngx_parked) return true;
 
   if (!s.snippet_inited) {
     wchar_t snippet[MAX_PATH] = {};
@@ -785,7 +791,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   const bool use_engine = foveated && split && s.feature_calls == 2 && fov::settings.engine_crop_w != 0 &&
                           nr_engine::Ready(cmd) && nr_engine::BeginFrame(cmd, in_color, history_reset);
   // One model call on a region of the inputs (the guides' region scales with them).
-  auto call = [&](void* feature, unsigned x, unsigned y, unsigned w, unsigned h) {
+  auto call = [&](void* feature, bool low, unsigned x, unsigned y, unsigned w, unsigned h) {
     const unsigned gx = x * guide_w / s.feature_w, gy = y * guide_h / s.feature_h;
     const unsigned gw = w * guide_w / s.feature_w, gh = h * guide_h / s.feature_h;
     SetResource(p, "DLSSNR.Color", in_color);
@@ -818,10 +824,9 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
 
     SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
-    WriteTuning(p, feature == s.feature2);
+    WriteTuning(p, low);
     if (use_engine) {
       // NVIDIA's controls, per region as NGX gets them (WriteTuning).
-      const bool low = feature == s.feature2;
       nr_engine::Controls ctl;
       ctl.intensity = low ? s.split_global_intensity : s.intensity;
       ctl.style = low ? s.split_global_style : s.style;
@@ -833,6 +838,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
                          frame, s.engine_history, ctl))
         return 1;
     }
+    if (feature == nullptr) return 0;   // parked: the engine was to run this one
     return s.evaluate(cmd, feature, s.caps);
   };
   LARGE_INTEGER model_t0;
@@ -846,15 +852,24 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
-    result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
+    result = call(s.feature, false, 0, 0, l.crop_w, l.crop_h);
     if (result == 1 && global_fresh && fov::settings.periphery_pass) {
       if (every > 1) reset = 1;
-      result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
+      result = call(s.feature2, true, l.low_x, 0, l.low_w, l.low_h);
     }
   } else {
-    result = call(s.feature, 0, 0, s.feature_w, s.feature_h);
+    result = call(s.feature, false, 0, 0, s.feature_w, s.feature_h);
   }
   if (use_engine) nr_engine::EndFrame(cmd);
+  // Once the engine has carried both passes for a while, NGX's standby features go (see ngx_parked).
+  s.engine_frames = use_engine && result == 1 ? s.engine_frames + 1 : 0;
+  if (s.engine_frames >= 60 && !s.ngx_parked && s.feature != nullptr) {
+    Bury(nullptr, s.feature);
+    Bury(nullptr, s.feature2);
+    s.feature = s.feature2 = nullptr;
+    s.ngx_parked = true;
+    ngx_probe::Log("nr-fwd: our engine runs both passes; NGX's NR features released");
+  }
   {
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -953,16 +968,22 @@ inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
   {
     unsigned fw = 0, fh = 0;
     FeatureSize(&fw, &fh);
-    if (s.feature != nullptr && (s.feature_w != fw || s.feature_h != fh))
+    const bool built = s.feature != nullptr || s.ngx_parked;
+    if (built && (s.feature_w != fw || s.feature_h != fh))
       RetireFeature("foveation geometry changed");
-    if (s.feature != nullptr && s.feature_calls != WantedCalls())
+    if (built && s.feature_calls != WantedCalls())
       RetireFeature("split calls changed");
+  }
+  // Parked while the engine covered both passes; it no longer does (switched off, not ready, failed).
+  if (s.ngx_parked && !EngineCovers()) {
+    ngx_probe::Log("nr-fwd: the engine no longer runs both passes; creating NGX's features again");
+    RetireFeature("NGX taking over from the engine");
   }
   if (!EnsureSetup(cmd)) return false;
   // A rebuild waits for the retired features to be released: creating the new ones beside them doubled the
   // NGX memory for the graveyard's lifetime, and at full resolution that overflowed VRAM and the driver kept
   // spilling to system memory for the rest of the session. The pass sits out those few frames instead.
-  if (s.feature == nullptr)
+  if (s.feature == nullptr && !s.ngx_parked)
     for (const auto& g : s.graveyard)
       if (g.feature != nullptr) return false;
   return EnsureFeature(cmd);
