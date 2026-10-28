@@ -366,14 +366,12 @@ void PollLiveSettings() {
   if (f.global_every < 1 || f.global_every > 4) f.global_every = 1;
 
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
-  s.ngx_live_tuning = LiveInt(path, "NgxLiveTuning", s.ngx_live_tuning ? 1 : 0) != 0;
-  const bool tuning = s.intensity != old_model[0] || s.local_structure != old_model[1] ||
-                      s.local_tone != old_model[2] || s.style != old_style || s.skin_structure != old_floats[0] ||
-                      s.split_global_intensity != old_periphery[0] || s.split_global_structure != old_periphery[1] ||
-                      s.split_global_tone != old_periphery[2] || (float)s.split_global_style != old_periphery[3];
-  if ((tuning && !s.ngx_live_tuning) || s.preset != old_preset ||
+  if (s.intensity != old_model[0] || s.local_structure != old_model[1] ||
+      s.local_tone != old_model[2] || s.preset != old_preset || s.style != old_style ||
       s.mask_blend_mode != old_ints[0] || s.ui_correction != old_ints[1] || s.auto_mask != old_ints[2] || s.split_global_preset != old_ints[3] ||
-      s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2])
+      s.skin_structure != old_floats[0] || s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2] ||
+      s.split_global_intensity != old_periphery[0] || s.split_global_structure != old_periphery[1] ||
+      s.split_global_tone != old_periphery[2] || (float)s.split_global_style != old_periphery[3])
     nr_runner::ApplyModelSettings();
   SaveSettings();
   ngx_probe::Log("nr-fwd: live settings applied from dlssnr-linux-live.ini");
