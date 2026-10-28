@@ -273,7 +273,10 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   // Before the upscale, the pass rewrites DLSS-SR's input and the evaluate reads our copy; after
   // it (the default), the pass rewrites DLSS-SR's output.
   ID3D12Resource* const swapped = nr_runner::BeforeDlss(cmd_list, params);
-  const auto eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
+  // DLAA off: the frame is copied to the Output instead of DLSS-SR's 1:1 pass, and the pass runs on it.
+  const auto eval_result = swapped == nullptr && nr_runner::CopyInsteadOfDlaa(cmd_list, params)
+                               ? NVSDK_NGX_Result_Success
+                               : real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
   if (swapped != nullptr)
     nr_runner::AfterDlss(cmd_list, params, swapped);
   else if (eval_result == NVSDK_NGX_Result_Success)

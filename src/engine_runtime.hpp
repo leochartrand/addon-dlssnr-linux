@@ -679,7 +679,7 @@ struct Controls {
 // `history` scales the network's blend weight (1 = NVIDIA's, 0 = none).
 inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource* src, ID3D12Resource* motion,
                 ID3D12Resource* dst, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t frame,
-                float history, float motion_scale, const Controls& ctl) {
+                float history, const Controls& ctl) {
   if (!g.in_frame || region >= kRegions) return false;
   const Program& p = Prog(region);
   if (w > p.field_w || h > p.field_h || w == 0 || h == 0) return false;
@@ -691,6 +691,7 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   const float blend = p.blend_scale * history;
   uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0, 0, 0};
   std::memcpy(&c[9], &blend, 4);
+  const float motion_scale = 1.0f;
   std::memcpy(&c[10], &motion_scale, 4);
   const float intensity = ctl.intensity < 0.0f ? 0.0f : (ctl.intensity > 1.0f ? 1.0f : ctl.intensity);
   std::memcpy(&c[11], &intensity, 4);

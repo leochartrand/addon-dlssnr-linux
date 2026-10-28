@@ -131,6 +131,8 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalStructureIntensity", s.split_global_structure);
   reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalGlobalIntensity", s.split_global_tone);
   reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalStyle", s.split_global_style);
+  reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalSkinStructure", s.split_global_skin);
+  reshade::get_config_value(nullptr, kConfigSection, "DLAA", s.dlaa);
   reshade::get_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   auto& f = fov::settings;
@@ -170,6 +172,7 @@ void LoadSettings() {
   s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 2.0f);
   s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 2.0f);
   s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 2.0f);
+  s.split_global_skin = Clamp(s.split_global_skin, -1.0f, 2.0f);
   if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
   if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
   if (f.fovea_debug < 0 || f.fovea_debug > 3) f.fovea_debug = 0;
@@ -212,6 +215,8 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalStructureIntensity", s.split_global_structure);
   reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalGlobalIntensity", s.split_global_tone);
   reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalStyle", s.split_global_style);
+  reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalSkinStructure", s.split_global_skin);
+  reshade::set_config_value(nullptr, kConfigSection, "DLAA", s.dlaa);
   reshade::set_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
 
   const auto& f = fov::settings;
@@ -281,8 +286,8 @@ void PollLiveSettings() {
   const int old_preset = s.preset, old_style = s.style;
   const int old_ints[4] = {s.mask_blend_mode, s.ui_correction, s.auto_mask, s.split_global_preset};
   const float old_floats[3] = {s.skin_structure, s.global_tone, s.scaling_ratio};
-  const float old_periphery[4] = {s.split_global_intensity, s.split_global_structure, s.split_global_tone,
-                                  (float)s.split_global_style};
+  const float old_periphery[5] = {s.split_global_intensity, s.split_global_structure, s.split_global_tone,
+                                  (float)s.split_global_style, s.split_global_skin};
 
   nr_runner::SetEnabled(LiveInt(path, "Enabled", nr_runner::IsEnabled() ? 1 : 0) != 0);
   s.debug_view = LiveInt(path, "DebugView", s.debug_view);
@@ -306,6 +311,8 @@ void PollLiveSettings() {
   s.split_global_structure = LiveFloat(path, "SplitGlobalStructureIntensity", s.split_global_structure);
   s.split_global_tone = LiveFloat(path, "SplitGlobalGlobalIntensity", s.split_global_tone);
   s.split_global_style = LiveInt(path, "SplitGlobalStyle", s.split_global_style);
+  s.split_global_skin = LiveFloat(path, "SplitGlobalSkinStructure", s.split_global_skin);
+  s.dlaa = LiveInt(path, "DLAA", s.dlaa ? 1 : 0) != 0;
   s.before_upscale = LiveInt(path, "BeforeUpscale", s.before_upscale ? 1 : 0) != 0;
   f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
   f.width = LiveFloat(path, "FoveaWidth", f.width);
@@ -329,7 +336,6 @@ void PollLiveSettings() {
   f.crop_snap = LiveInt(path, "CropSnap", f.crop_snap);
   if (f.crop_snap < 0 || f.crop_snap > 256) f.crop_snap = 32;
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
-  s.engine_motion = Clamp(LiveFloat(path, "EngineMotion", s.engine_motion), 0.0f, 2.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
   diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
 
@@ -371,7 +377,8 @@ void PollLiveSettings() {
       s.mask_blend_mode != old_ints[0] || s.ui_correction != old_ints[1] || s.auto_mask != old_ints[2] || s.split_global_preset != old_ints[3] ||
       s.skin_structure != old_floats[0] || s.global_tone != old_floats[1] || s.scaling_ratio != old_floats[2] ||
       s.split_global_intensity != old_periphery[0] || s.split_global_structure != old_periphery[1] ||
-      s.split_global_tone != old_periphery[2] || (float)s.split_global_style != old_periphery[3])
+      s.split_global_tone != old_periphery[2] || (float)s.split_global_style != old_periphery[3] ||
+      s.split_global_skin != old_periphery[4])
     nr_runner::ApplyModelSettings();
   SaveSettings();
   ngx_probe::Log("nr-fwd: live settings applied from dlssnr-linux-live.ini");
@@ -455,6 +462,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   ImGui::Separator();
   ImGui::TextUnformatted("Foveation (the model runs on a squeezed frame)");
   auto& f = fov::settings;
+  changed |= ImGui::Checkbox("Anti-aliasing (DLAA) on the frame before the pass", &nr_runner::s.dlaa);
   changed |= ImGui::Checkbox("Foveated NR", &f.enabled);
   changed |= SliderWithReset("Fovea width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
   changed |= SliderWithReset("Fovea height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
@@ -495,6 +503,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       model |= SliderWithReset("Periphery global intensity", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
       model |= ImGui::SliderInt("Periphery preset", &s.split_global_preset, -1, 7, s.split_global_preset < 0 ? "same as fovea" : "%d");
       model |= ImGui::Combo("Periphery style", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
+      model |= SliderWithReset("Periphery skin detail (-1 = its structure)", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
       if (model) nr_runner::ApplyModelSettings();
       changed |= model;
     }

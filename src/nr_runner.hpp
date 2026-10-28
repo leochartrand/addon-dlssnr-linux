@@ -176,13 +176,15 @@ struct State {
   float split_global_structure = 1.0f;
   float split_global_tone = 1.0f;
   int split_global_style = 0;
+  float split_global_skin = -1.0f;   // the periphery's skin detail, -1 = its own structure intensity
+  // DLSS-SR at 1:1 (DLAA) on the frame before the pass; off copies the frame through instead (saves its cost).
+  bool dlaa = true;
   // Split in two calls: run both regions on our own engine (engine_runtime.hpp) instead of the NGX
   // features, which stay built for an instant A/B and as the fallback while the engine loads.
   bool engine = false;
   // ...and its temporal loop: the network's own history blend (NVIDIA's), scaled by this (1 = as the
   // library does it, 0 = single frames).
   float engine_history = 1.0f;
-  float engine_motion = 1.0f;   // scale on the motion the engine's history follows (diagnostic)
   uint32_t stamped = 0;         // diag stamps the engine marked this frame (bit per diag::Stamp)
 
   // Geometry of the game's current DLSS-SR feature.
@@ -581,7 +583,7 @@ inline void WriteTuning(void* p, bool periphery) {
   SetUInt(p, "DLSSNR.Style", (unsigned)(periphery ? s.split_global_style : s.style));
   SetFloat(p, "DLSSNR.LocalStructureStrength", periphery ? s.split_global_structure : s.local_structure);
   SetFloat(p, "DLSSNR.LocalToneStrength", periphery ? s.split_global_tone : s.local_tone);
-  SetFloat(p, "DLSSNR.SkinStructureStrength", s.skin_structure);
+  SetFloat(p, "DLSSNR.SkinStructureStrength", periphery ? s.split_global_skin : s.skin_structure);
   if (s.auto_mask >= 0) SetUInt(p, "DLSSNR.UseAutoMask", (unsigned)s.auto_mask);
   if (s.ui_correction >= 0) SetUInt(p, "DLSSNR.UICorrection", (unsigned)s.ui_correction);
   if (s.mask_blend_mode >= 0) SetUInt(p, "DLSSNR.MaskBlendMode", (unsigned)s.mask_blend_mode);
@@ -825,10 +827,10 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
       ctl.style = low ? s.split_global_style : s.style;
       ctl.tone = low ? s.split_global_tone : s.local_tone;
       ctl.structure = low ? s.split_global_structure : s.local_structure;
-      ctl.skin = s.skin_structure;
+      ctl.skin = low ? s.split_global_skin : s.skin_structure;
       ctl.auto_mask = s.auto_mask != 0;
       if (nr_engine::Run(cmd, low ? nr_engine::kLow : nr_engine::kCrop, in_color, in_motion, answer, x, y, w, h,
-                         frame, s.engine_history, s.engine_motion, ctl))
+                         frame, s.engine_history, ctl))
         return 1;
     }
     return s.evaluate(cmd, feature, s.caps);
@@ -1037,6 +1039,25 @@ inline void AfterDlss(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter*
                       ID3D12Resource* original) {
   const_cast<NVSDK_NGX_Parameter*>(game_params)->Set(NVSDK_NGX_Parameter_Color, original);
   Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+// DLAA off: when DLSS-SR runs 1:1 and Color and Output match, copy Color to Output in place of its evaluate
+// (Color in NON_PIXEL_SHADER_RESOURCE, Output in UNORDERED_ACCESS, as DLSS has them). True when it did.
+inline bool CopyInsteadOfDlaa(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params) {
+  if (s.dlaa || cmd == nullptr || game_params == nullptr) return false;
+  ID3D12Resource* color = nullptr;
+  ID3D12Resource* output = nullptr;
+  game_params->Get(NVSDK_NGX_Parameter_Color, &color);
+  game_params->Get(NVSDK_NGX_Parameter_Output, &output);
+  if (color == nullptr || output == nullptr) return false;
+  const D3D12_RESOURCE_DESC c = color->GetDesc(), o = output->GetDesc();
+  if (c.Width != o.Width || c.Height != o.Height || c.Format != o.Format) return false;
+  Transition(cmd, color, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  Transition(cmd, output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+  cmd->CopyResource(output, color);
+  Transition(cmd, color, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  Transition(cmd, output, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  return true;
 }
 
 // Called after every successful game DLSS-SR evaluate, on the game's own command list.
