@@ -182,6 +182,7 @@ struct State {
   // ...and its temporal loop: the network's own history blend (NVIDIA's), scaled by this (1 = as the
   // library does it, 0 = single frames).
   float engine_history = 1.0f;
+  float engine_motion = 1.0f;   // scale on the motion the engine's history follows (diagnostic)
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -796,7 +797,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
     WriteTuning(p, feature == s.feature2);
     if (use_engine && nr_engine::Run(cmd, feature == s.feature2 ? nr_engine::kLow : nr_engine::kCrop, in_color,
-                                     in_motion, answer, x, y, w, h, frame, s.engine_history))
+                                     in_motion, answer, x, y, w, h, frame, s.engine_history, s.engine_motion))
       return 1;
     return s.evaluate(cmd, feature, s.caps);
   };

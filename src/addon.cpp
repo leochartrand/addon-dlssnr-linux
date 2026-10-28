@@ -329,6 +329,7 @@ void PollLiveSettings() {
   f.crop_snap = LiveInt(path, "CropSnap", f.crop_snap);
   if (f.crop_snap < 0 || f.crop_snap > 256) f.crop_snap = 32;
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
+  s.engine_motion = Clamp(LiveFloat(path, "EngineMotion", s.engine_motion), 0.0f, 2.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.

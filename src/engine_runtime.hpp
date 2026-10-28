@@ -48,7 +48,7 @@ constexpr uint32_t kNvCreateCubinEx = 0x3151211b;   // NvAPI_D3D12_CreateCubinCo
 constexpr uint32_t kNvLaunchCubin = 0x5c52bb86;     // NvAPI_D3D12_LaunchCubinShader
 
 constexpr uint32_t kRingSize = 8;       // frames of descriptors in flight
-constexpr uint32_t kConstants = 10;     // EngineConstants in engine_common.hlsli
+constexpr uint32_t kConstants = 11;     // EngineConstants in engine_common.hlsli
 constexpr uint32_t kUses = 4;           // descriptor sets per frame: in and out of each region
 constexpr uint32_t kSlots = 5;          // t0-t2, u1-u2
 constexpr uint64_t kStaging = 64ull << 20;
@@ -600,7 +600,7 @@ inline bool BeginFrame(ID3D12GraphicsCommandList* cmd, ID3D12Resource* atlas, bo
 // `history` scales the network's blend weight (1 = NVIDIA's, 0 = none).
 inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource* src, ID3D12Resource* motion,
                 ID3D12Resource* dst, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t frame,
-                float history) {
+                float history, float motion = 1.0f) {
   if (!g.in_frame || region >= kRegions) return false;
   const Program& p = Prog(region);
   if (w > p.field_w || h > p.field_h || w == 0 || h == 0) return false;
@@ -610,8 +610,9 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   history = history < 0.0f ? 0.0f : (history > 1.0f ? 1.0f : history);
   const bool valid = !g.reset && g.ran_last[region];
   const float blend = p.blend_scale * history;
-  uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0};
+  uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0, 0};
   std::memcpy(&c[9], &blend, 4);
+  std::memcpy(&c[10], &motion, 4);
   ID3D12Resource* const prev = g.hist[g.flip];
   ID3D12Resource* const next = g.hist[g.flip ^ 1];
   const D3D12_GPU_VIRTUAL_ADDRESS hist_in = p.Va(p.hist_seg, p.hist_off);
