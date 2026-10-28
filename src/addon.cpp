@@ -148,6 +148,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
   reshade::get_config_value(nullptr, kConfigSection, "Relight", f.relight);
   reshade::get_config_value(nullptr, kConfigSection, "RelightDarkenOnly", f.relight_mode);
+  reshade::get_config_value(nullptr, kConfigSection, "SkyNoRelight", f.sky_no_relight);
   reshade::get_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::get_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::get_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
@@ -233,6 +234,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
   reshade::set_config_value(nullptr, kConfigSection, "Relight", f.relight);
   reshade::set_config_value(nullptr, kConfigSection, "RelightDarkenOnly", f.relight_mode);
+  reshade::set_config_value(nullptr, kConfigSection, "SkyNoRelight", f.sky_no_relight);
   reshade::set_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::set_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::set_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
@@ -326,6 +328,7 @@ void PollLiveSettings() {
   f.grade_blur = LiveFloat(path, "GradeBlur", f.grade_blur);
   f.relight = LiveFloat(path, "Relight", f.relight);
   f.relight_mode = LiveInt(path, "RelightDarkenOnly", f.relight_mode);
+  f.sky_no_relight = LiveInt(path, "SkyNoRelight", f.sky_no_relight ? 1 : 0) != 0;
   f.split_calls = LiveInt(path, "SplitCalls", f.split_calls);
   f.tone_smoothing = LiveFloat(path, "ToneSmoothing", f.tone_smoothing);
   f.tone_deadband = LiveFloat(path, "ToneDeadband", f.tone_deadband);
@@ -480,6 +483,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       f.relight_mode = darken ? 1 : 0;
       changed = true;
     }
+    changed |= ImGui::Checkbox("No relighting on the sky (depth at the far plane)", &f.sky_no_relight);
     bool two = f.split_calls == 2;
     if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
       f.split_calls = two ? 2 : 1;

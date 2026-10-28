@@ -53,7 +53,7 @@ constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploa
 enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
 constexpr uint32_t kSlotsPerPass = 10;    // t0-t6 (t3 the LUT), u0-u2
-constexpr uint32_t kConstants = 33;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kConstants = 34;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -93,6 +93,9 @@ struct Settings {
   // reaches the picture, and whether it may only darken, without colour (0), like ambient occlusion.
   float relight = 1.0f;
   int relight_mode = 0;
+  // Split: no broad relighting where the game's depth is at the far plane. A heuristic: it assumes the sky is
+  // drawn there, which holds in many games (Dishonored) and not in those with a sky mesh at a finite depth.
+  bool sky_no_relight = false;
 };
 
 inline Settings settings;
@@ -964,6 +967,7 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   std::memcpy(&c[27], &alpha, 4);
   std::memcpy(&c[28], &settings.tone_deadband, 4);
   c[32] = depth_inverted ? 1u : 0u;
+  c[33] = settings.sky_no_relight ? 1u : 0u;
 
   Barrier(cmd, g.answer_s, kUav, kSrv);
   if (!settings.periphery_pass) {
