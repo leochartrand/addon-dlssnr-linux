@@ -182,7 +182,10 @@ struct State {
   // ...and its temporal loop: the network's own history blend (NVIDIA's), scaled by this (1 = as the
   // library does it, 0 = single frames).
   float engine_history = 1.0f;
-  float engine_motion = 1.0f;   // scale on the motion the engine's history follows (diagnostic)
+  float engine_motion = 1.0f;
+  // Diagnostic (live key NgxLiveTuning): the intensities, style and skin detail, which WriteTuning passes
+  // with every evaluate, change without rebuilding NGX's features -- to find out whether NGX reads them live.
+  bool ngx_live_tuning = false;   // scale on the motion the engine's history follows (diagnostic)
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
