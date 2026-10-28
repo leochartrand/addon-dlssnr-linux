@@ -334,6 +334,7 @@ void PollLiveSettings() {
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   f.crop_snap = LiveInt(path, "CropSnap", f.crop_snap);
+  f.jump_reset = Clamp(LiveFloat(path, "GazeJumpReset", f.jump_reset), 0.02f, 2.0f);
   if (f.crop_snap < 0 || f.crop_snap > 256) f.crop_snap = 32;
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
@@ -451,6 +452,18 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   }
   ImGui::PopID();
 
+  changed |= SliderWithReset("Skin detail (-1 = structure)", &s.skin_structure, -1.0f, 2.0f, "%.2f", -1.0f);
+  if (ImGui::TreeNode("NVIDIA's advanced options")) {
+    // NGX's own parameters; -1 (or 0 for the ratio) leaves the library's default. Our engine reads the skin
+    // mask; the others reach NGX only.
+    changed |= ImGui::SliderInt("Skin mask (-1 default, 0 off, 1 on)", &s.auto_mask, -1, 1);
+    changed |= ImGui::SliderInt("UI correction (-1 default, NGX only)", &s.ui_correction, -1, 1);
+    changed |= ImGui::SliderInt("Mask blend mode (-1 default, NGX only)", &s.mask_blend_mode, -1, 3);
+    changed |= SliderWithReset("Global tone strength (-1 unset, NGX only)", &s.global_tone, -1.0f, 2.0f, "%.2f", -1.0f);
+    changed |= SliderWithReset("Scaling ratio (0 unset, NGX only)", &s.scaling_ratio, 0.0f, 4.0f, "%.2f", 0.0f);
+    ImGui::TreePop();
+  }
+
   if (ImGui::Button("Apply model settings")) nr_runner::ApplyModelSettings();
 
   // Only differs from the default when the game's DLSS really upscales (input smaller than output).
@@ -479,6 +492,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     }
     changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
     changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
+    changed |= ImGui::SliderInt("Crop snap (px; 0-1 = follow the gaze exactly)", &f.crop_snap, 0, 256);
     changed |= ImGui::SliderInt("Whole-frame pass every", &f.global_every, 1, 4, "%d frames");
     if (f.split_calls == 2) {
       // Each pass is its own feature: its own network and hand, and a debug view of it alone.
@@ -512,6 +526,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   if (f.gaze_source == 1) {
     changed |= ImGui::InputInt("Gaze UDP port", &f.gaze_port);
     changed |= SliderWithReset("Gaze smoothing", &f.gaze_smooth_ms, 0.0f, 200.0f, "%.0f ms", 30.0f);
+    changed |= SliderWithReset("Gaze jump that resets the history", &f.jump_reset, 0.02f, 2.0f, "%.2f of the frame", 0.20f);
     float gx = 0.0f, gy = 0.0f;
     if (fov::GazeLatest(&gx, &gy)) ImGui::Text("Gaze: %.3f, %.3f", gx, gy);
     else ImGui::TextUnformatted("Gaze: no packets in the last 0.5 s (centre used)");
