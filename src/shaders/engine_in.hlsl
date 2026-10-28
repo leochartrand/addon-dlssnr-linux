@@ -1,35 +1,28 @@
-// The NR engine's input: an atlas region (the display-referred proxy) -> float32 [3, field_h, field_w]
-// at k/255, the region's last row and column mirrored out to the field (dlssnr frame_to_tensor).
-Texture2D<float4> Src : register(t0);
+// The NR engine's inputs for one region of the atlas: the frame, float32 [3, field_h, field_w], and the
+// history (features 7-9): last frame's answer reprojected, or the frame itself where there is none. The
+// region's last row and column are mirrored out to the field (dlssnr frame_to_tensor). The proxy goes in
+// as the half floats the model is given, as NVIDIA's library reads it.
+#include "engine_common.hlsli"
+
 RWByteAddressBuffer Image : register(u0);
-
-cbuffer EngineConstants : register(b0)
-{
-    uint g_x;
-    uint g_y;
-    uint g_w;
-    uint g_h;
-    uint g_field_w;
-    uint g_field_h;
-};
-
-// Reflect once about the last pixel, then clamp what is still outside.
-uint Mirror(uint i, uint n)
-{
-    int r = i < n ? (int)i : 2 * (int)n - (int)i - 2;
-    return (uint)clamp(r, 0, (int)n - 1);
-}
+RWByteAddressBuffer Hist : register(u3);
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= g_field_w || id.y >= g_field_h)
         return;
-    float3 c = saturate(Src[uint2(g_x + Mirror(id.x, g_w), g_y + Mirror(id.y, g_h))].rgb);
-    c = floor(c * 255.0 + 0.5) / 255.0;
+    uint2 p = uint2(g_x + Mirror(id.x, g_w), g_y + Mirror(id.y, g_h));
+    float3 c = saturate(Proxy[p].rgb);
+    float3 h = c;
+    float2 prev;
+    if (Reproject(p, prev))
+        h = History(prev);
     uint plane = g_field_w * g_field_h;
     uint i = id.y * g_field_w + id.x;
-    Image.Store(i * 4, asuint(c.r));
-    Image.Store((plane + i) * 4, asuint(c.g));
-    Image.Store((2 * plane + i) * 4, asuint(c.b));
+    [unroll] for (uint k = 0; k < 3; ++k)
+    {
+        Image.Store((k * plane + i) * 4, asuint(c[k]));
+        Hist.Store((k * plane + i) * 4, asuint(h[k]));
+    }
 }

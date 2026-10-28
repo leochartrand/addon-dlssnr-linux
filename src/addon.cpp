@@ -324,7 +324,7 @@ void PollLiveSettings() {
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
-  s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 0.95f);
+  s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
@@ -471,10 +471,12 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       static const char kPassViews[] = "Off\0What the model sees\0Model answer\0Difference x20\0";
       changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
       if (s.engine)
-        ImGui::Text("Engine: %s -- both regions at its %ux%u field; NGX runs until it is ready",
-                    nr_engine::StatusText(), nr_engine::g.prog.field_w, nr_engine::g.prog.field_h);
+        ImGui::Text("Engine: %s -- regions at %ux%u and %ux%u; NGX runs until it is ready", nr_engine::StatusText(),
+                    nr_engine::g.progs[0].field_w, nr_engine::g.progs[0].field_h,
+                    nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_w,
+                    nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
       if (s.engine)
-        changed |= SliderWithReset("Engine history", &s.engine_history, 0.0f, 0.95f, "%.2f", 0.7f);
+        changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
       ImGui::TextUnformatted("Fovea pass (full-res crop): the model settings above");
       changed |= ImGui::Combo("Fovea pass debug view", &f.fovea_debug, kPassViews);
       ImGui::TextUnformatted("Periphery pass (low-res whole frame)");

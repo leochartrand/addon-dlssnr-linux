@@ -179,9 +179,9 @@ struct State {
   // Split in two calls: run both regions on our own engine (engine_runtime.hpp) instead of the NGX
   // features, which stay built for an instant A/B and as the fallback while the engine loads.
   bool engine = false;
-  // ...and how much of the engine's last answer (reprojected) carries into this frame's: it has no
-  // history of its own, so without this its answer can flicker. 0 = none.
-  float engine_history = 0.7f;
+  // ...and its temporal loop: the network's own history blend (NVIDIA's), scaled by this (1 = as the
+  // library does it, 0 = single frames).
+  float engine_history = 1.0f;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -219,8 +219,10 @@ inline void UpdateFrameSize() {
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
   const bool engine = s.engine && split && fov::settings.split_calls == 2;
-  fov::settings.engine_w = engine ? nr_engine::FieldW() : 0;
-  fov::settings.engine_h = engine ? nr_engine::FieldH() : 0;
+  fov::settings.engine_crop_w = engine ? nr_engine::FieldW(nr_engine::kCrop) : 0;
+  fov::settings.engine_crop_h = engine ? nr_engine::FieldH(nr_engine::kCrop) : 0;
+  fov::settings.engine_low_w = engine ? nr_engine::FieldW(nr_engine::kLow) : 0;
+  fov::settings.engine_low_h = engine ? nr_engine::FieldH(nr_engine::kLow) : 0;
 }
 
 // Model calls per frame the current settings ask for: 2 for split foveation in separate calls.
@@ -751,8 +753,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
   const uint32_t n = ++s.eval_count;
   // Our engine takes the split calls once it has loaded and the regions are at its field.
-  const bool use_engine = foveated && split && s.feature_calls == 2 && fov::settings.engine_w != 0 &&
-                          nr_engine::Ready(cmd);
+  const bool use_engine = foveated && split && s.feature_calls == 2 && fov::settings.engine_crop_w != 0 &&
+                          nr_engine::Ready(cmd) && nr_engine::BeginFrame(cmd, in_color, history_reset);
   // One model call on a region of the inputs (the guides' region scales with them).
   auto call = [&](void* feature, unsigned x, unsigned y, unsigned w, unsigned h) {
     const unsigned gx = x * guide_w / s.feature_w, gy = y * guide_h / s.feature_h;
@@ -788,7 +790,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
     WriteTuning(p, feature == s.feature2);
-    if (use_engine && nr_engine::Run(cmd, in_color, x, y, w, h, frame, feature == s.feature2 ? 1 : 0))
+    if (use_engine && nr_engine::Run(cmd, feature == s.feature2 ? nr_engine::kLow : nr_engine::kCrop, in_color,
+                                     in_motion, answer, x, y, w, h, frame, s.engine_history))
       return 1;
     return s.evaluate(cmd, feature, s.caps);
   };
@@ -802,18 +805,14 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
-    bool low_ran = false;
     if (result == 1 && global_fresh && fov::settings.periphery_pass) {
       if (every > 1) reset = 1;
       result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
-      low_ran = true;
     }
-    if (result == 1 && use_engine)
-      nr_engine::Temporal(cmd, in_color, in_motion, answer, l.crop_w, l.crop_h, l.low_x, l.low_w, l.low_h,
-                          frame, s.engine_history, history_reset, low_ran);
   } else {
     result = call(s.feature, 0, 0, s.feature_w, s.feature_h);
   }
+  if (use_engine) nr_engine::EndFrame(cmd);
 
   if (n <= kFullLogs || n % kHeartbeatEvery == 0) {
     ngx_probe::Logf("nr-fwd: %s #%u => 0x%x (%s)", use_engine ? "engine" : "EvaluateFeature", n,

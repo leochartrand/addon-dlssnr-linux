@@ -82,9 +82,9 @@ struct Settings {
   // game's own frame (with whatever lighting shaders run before the feed), inside it the crop's answer
   // with its own coarse part.
   bool periphery_pass = true;
-  // Split with two calls on our NR engine (nr_engine): its field, which both regions snap to (0 = NGX,
-  // the regions follow the settings above). Set by the runner each frame.
-  uint32_t engine_w = 0, engine_h = 0;
+  // Split with two calls on our NR engine (nr_engine): its programs' fields, which the regions snap to
+  // (0 = NGX, the regions follow the settings above). Set by the runner each frame.
+  uint32_t engine_crop_w = 0, engine_crop_h = 0, engine_low_w = 0, engine_low_h = 0;
 };
 
 inline Settings settings;
@@ -317,11 +317,14 @@ inline SplitLayout SplitSize(uint32_t full_w, uint32_t full_h) {
   l.crop_h = len(full_h, st.height);
   l.low_w = len(full_w, st.global_scale);
   l.low_h = len(full_h, st.global_scale);
-  if (st.engine_w != 0 && st.engine_w <= full_w && st.engine_h <= full_h) {
-    // The engine runs one field size: the crop is the field, and the low-res frame fills it too
-    // (a slightly different aspect is undone by the expand, which maps it back over the frame).
-    l.crop_w = l.low_w = st.engine_w;
-    l.crop_h = l.low_h = st.engine_h;
+  if (st.engine_crop_w != 0 && st.engine_crop_w <= full_w && st.engine_crop_h <= full_h &&
+      st.engine_low_w <= full_w && st.engine_low_h <= full_h) {
+    // The engine runs each region at its program's field, which is its own size (no padding). A
+    // low-res aspect slightly off the frame's is undone by the expand, which maps it back over it.
+    l.crop_w = st.engine_crop_w;
+    l.crop_h = st.engine_crop_h;
+    l.low_w = st.engine_low_w;
+    l.low_h = st.engine_low_h;
   }
   l.low_x = l.crop_w + kSplitGap;
   l.work_w = l.low_x + l.low_w;
