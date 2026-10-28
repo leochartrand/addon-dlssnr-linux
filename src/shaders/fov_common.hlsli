@@ -50,6 +50,7 @@ cbuffer FovConstants : register(b0)
     uint g_pass_debug;     // split expand: 0 off, 1-3 the fovea pass alone, 4-6 the periphery pass alone
     float g_relight;       // split: share of the model's broad brightness and colour change kept (1 = all)
     uint g_relight_mode;   // split: 0 any change, 1 darkening only, brightness only (ambient occlusion-like)
+    uint g_depth_inverted; // split expand: the game's depth is reversed (far = 0)
 };
 
 // Split mode: the crop's origin this frame and last, in full pixels, as fov_split_crop placed it on

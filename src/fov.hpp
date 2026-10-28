@@ -52,8 +52,8 @@ namespace fov {
 constexpr uint32_t kRingSize = 8;         // frames of descriptors and LUT uploads in flight
 enum Pass : uint32_t { kSqueeze, kExpand, kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
-constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the LUT), u0-u2
-constexpr uint32_t kConstants = 32;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kSlotsPerPass = 10;    // t0-t6 (t3 the LUT), u0-u2
+constexpr uint32_t kConstants = 33;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -368,12 +368,12 @@ inline void WorkSize(uint32_t full_w, uint32_t full_h, uint32_t* w, uint32_t* h)
   *h = WorkLength(full_h, st.height * full_h, st.falloff * full_h, st.edge);
 }
 
-// Root signature: [0] SRV table t0-t5, [1] UAV table u0-u2, [2] constants b0, static linear s0.
+// Root signature: [0] SRV table t0-t6, [1] UAV table u0-u2, [2] constants b0, static linear s0.
 inline bool Init(ID3D12Device* device) {
   if (g.root_sig != nullptr) return true;
   if (g.failed) return false;
 
-  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0, 0, 0};
+  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 0, 0};
   D3D12_DESCRIPTOR_RANGE uav = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0};
   D3D12_ROOT_PARAMETER params[3] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -568,19 +568,21 @@ inline void CropSrv(ID3D12Device* d, uint32_t i) {
 // debug view).
 inline void Bind(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, ID3D12PipelineState* pso,
                  uint32_t frame, Pass pass, const View (&srv)[5], const View (&uav)[3],
-                 const uint32_t* constants, bool crop = false) {
+                 const uint32_t* constants, bool crop = false,
+                 View t6 = {nullptr, DXGI_FORMAT_R32_FLOAT}) {
   const uint32_t base = ((frame % kRingSize) * kPasses + pass) * kSlotsPerPass;
   const uint32_t reg[5] = {0, 1, 2, 4, 5};
   for (int i = 0; i < 5; ++i) Srv(device, base + reg[i], srv[i].r, srv[i].fallback);
+  Srv(device, base + 6, t6.r, t6.fallback);
   crop = crop || (pass >= kSplitSqueeze && pass <= kSplitExpand);
   if (crop && g.crop_state != nullptr) CropSrv(device, base + 3);
   else LutSrv(device, base + 3, frame);
-  for (int i = 0; i < 3; ++i) Uav(device, base + 6 + i, uav[i].r, uav[i].fallback);
+  for (int i = 0; i < 3; ++i) Uav(device, base + 7 + i, uav[i].r, uav[i].fallback);
   cmd->SetDescriptorHeaps(1, &g.heap);
   cmd->SetComputeRootSignature(g.root_sig);
   cmd->SetPipelineState(pso);
   cmd->SetComputeRootDescriptorTable(0, Gpu(base));
-  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 6));
+  cmd->SetComputeRootDescriptorTable(1, Gpu(base + 7));
   cmd->SetComputeRoot32BitConstants(2, kConstants, constants, 0);
 }
 
@@ -939,7 +941,8 @@ inline uint32_t PassDebug() {
 }
 
 inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, ID3D12Resource* proxy,
-                        ID3D12Resource* motion, uint32_t frame, bool global_fresh) {
+                        ID3D12Resource* motion, ID3D12Resource* depth, bool depth_inverted, uint32_t frame,
+                        bool global_fresh) {
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
   const uint32_t full_w = g.x.full, full_h = g.y.full;
@@ -960,6 +963,7 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   const float alpha = !g.hist_valid ? 1.0f : (global_fresh ? 1.0f - smoothing : 0.0f);
   std::memcpy(&c[27], &alpha, 4);
   std::memcpy(&c[28], &settings.tone_deadband, 4);
+  c[32] = depth_inverted ? 1u : 0u;
 
   Barrier(cmd, g.answer_s, kUav, kSrv);
   if (!settings.periphery_pass) {
@@ -968,7 +972,7 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
     c[29] = PassDebug();
     Bind(device, cmd, g.split_pso[3], frame, kSplitExpand,
          {{g.answer_s, kRgba}, {proxy, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}, {g.proxy_s, kRgba}},
-         {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c);
+         {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c, false, {depth, kR32});
     cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
     Barrier(cmd, g.answer_s, kSrv, kUav);
     g.hist_valid = false;   // the tone history is stale once the pass comes back
@@ -1000,7 +1004,7 @@ inline void SplitExpand(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer, 
   c[29] = PassDebug();
   Bind(device, cmd, g.split_pso[3], frame, kSplitExpand,
        {{g.answer_s, kRgba}, {proxy, kRgba}, {low[6], kRgba}, {low[7], kRgba}, {g.proxy_s, kRgba}},
-       {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c);
+       {{answer, kRgba}, {nullptr, kR32}, {nullptr, kRg16}}, c, false, {depth, kR32});
   cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
 
   for (int i = 0; i < 8; ++i) Barrier(cmd, low[i], kSrv, kUav);

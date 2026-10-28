@@ -12,6 +12,7 @@ Texture2D<float4> Proxy : register(t1);
 Texture2D<float4> OffsetPeriphery : register(t2);
 Texture2D<float4> OffsetFovea : register(t4);
 Texture2D<float4> InputAtlas : register(t5);   // what the model was given: crop and low-res frame
+Texture2D<float> Depth : register(t6);         // the game's depth, render size
 RWTexture2D<float4> Out : register(u0);
 
 float4 PassView(uint view, float4 seen, float4 answer)
@@ -83,6 +84,14 @@ void main(uint3 id : SV_DispatchThreadID)
     bool in_crop = all(c >= 0) && all(c < size);
     float3 off_periphery, off_fovea;
     Offsets(uv, base.rgb, in_crop, off_periphery, off_fovea);
+    // The sky (depth at the far plane) is never relit: the broad change there is the model inventing
+    // weather (dark blobs, halos hugging the skyline), and it is nothing ambient occlusion could do.
+    float2 to_render = float2(g_render_w, g_render_h) / float2(g_full_w, g_full_h);
+    uint2 rp = min((uint2)(((float2)id.xy + 0.5) * to_render), uint2(g_render_w - 1, g_render_h - 1));
+    float z = Depth[rp];
+    float sky = g_depth_inverted != 0 ? 1.0 - smoothstep(0.0, 1e-5, z) : smoothstep(1.0 - 1e-5, 1.0, z);
+    off_fovea -= sky * off_periphery;    // the crop keeps its fine detail, without the broad change
+    off_periphery *= 1.0 - sky;
     float4 result = float4(saturate(base.rgb + off_periphery), base.a);
 
     if (in_crop)

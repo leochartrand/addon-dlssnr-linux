@@ -202,6 +202,10 @@ struct State {
 
   // Set by the overlay thread (Apply button); consumed on the evaluate thread.
   std::atomic<bool> retire_pending{false};
+  // Model settings changed (NGX's network, hand and style): its features are rebuilt once the change
+  // has settled, and only when NGX runs -- our engine does not read them.
+  std::atomic<bool> model_pending{false};
+  std::atomic<unsigned long long> model_changed_at{0};
 
   std::vector<Grave> graveyard;
 
@@ -588,7 +592,10 @@ inline void WriteTuning(void* p, bool periphery) {
 // while building the feature, so it is retired and rebuilt. The overlay runs on the present
 // thread while the evaluate thread owns the feature and textures, so only a flag is set here;
 // the retire itself executes at the top of the next OnDlssEvaluated, on the owning thread.
-inline void ApplyModelSettings() { s.retire_pending.store(true, std::memory_order_relaxed); }
+inline void ApplyModelSettings() {
+  s.model_changed_at.store(GetTickCount64(), std::memory_order_relaxed);
+  s.model_pending.store(true, std::memory_order_relaxed);
+}
 
 inline bool EnsureFeature(ID3D12GraphicsCommandList* cmd) {
   if (s.feature != nullptr) return true;
@@ -853,7 +860,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   }
   s.fail_streak = 0;
   diag::Mark(cmd, diag::kModel);
-  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
+  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, depth, depth_inverted, frame, global_fresh);
   else if (foveated) fov::Expand(cmd, s.output, frame);
   diag::Mark(cmd, diag::kExpand);
 
@@ -895,11 +902,26 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   return true;
 }
 
+// Whether our engine runs both split passes now (NGX's features then only stand by).
+inline bool EngineCovers() {
+  return s.engine && nr_engine::g.status.load() == nr_engine::kReady && fov::settings.enabled &&
+         fov::settings.split && WantedCalls() == 2 && fov::settings.engine_crop_w != 0;
+}
+
 // Shared by both entry points: housekeeping, then whether the pass may run this frame.
 inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
   TickGraveyard();
   if (s.retire_pending.exchange(false, std::memory_order_relaxed))
     RetireFeature("model settings changed");
+  // A slider drag used to rebuild the features every tick; the retired ones wait 240 frames each, so a
+  // drag piled up NGX features until VRAM overflowed and the driver spilled to system memory for good.
+  // Rebuild once, half a second after the last change, and not at all while our engine runs both passes
+  // (it does not read these settings; they apply when NGX takes over again).
+  if (s.model_pending.load(std::memory_order_relaxed) &&
+      GetTickCount64() - s.model_changed_at.load(std::memory_order_relaxed) >= 500 && !EngineCovers()) {
+    s.model_pending.store(false, std::memory_order_relaxed);
+    RetireFeature("model settings changed");
+  }
   if (!s.enabled) return false;
   if (s.output != nullptr && (s.tex_w != s.frame_w || s.tex_h != s.frame_h))
     RetireFeature("the pass moved to the other side of the upscale");
