@@ -23,7 +23,7 @@ void main(uint3 id : SV_DispatchThreadID)
     if (crop)
     {
         uint2 u = min(id.xy, uint2(g_crop_w - 1, g_crop_h - 1));
-        full = float2(g_crop_x, g_crop_y) + (float2)u + 0.5;
+        full = CropOrigin() + (float2)u + 0.5;
         scale = 1.0;
         ProxyOut[id.xy] = Proxy[uint2(full)];
     }
@@ -42,8 +42,7 @@ void main(uint3 id : SV_DispatchThreadID)
     // Game convention: previous position = current + mv * scale, in render pixels.
     float2 mv_full = Motion[rp] * float2(g_mv_scale_x, g_mv_scale_y) / to_render;
     if (crop)
-        MotionOut[id.xy] = mv_full + float2((float)g_crop_x - (float)g_prev_crop_x,
-                                            (float)g_crop_y - (float)g_prev_crop_y);
+        MotionOut[id.xy] = mv_full + (CropOrigin() - PrevCropOrigin());
     else
         MotionOut[id.xy] = mv_full / scale;
 }

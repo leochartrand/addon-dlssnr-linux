@@ -43,7 +43,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     if (g_pass_debug >= 1)
     {
-        int2 q = (int2)id.xy - int2(g_crop_x, g_crop_y);
+        int2 q = (int2)id.xy - int2(CropOrigin());
         bool inside = all(q >= 0) && all(q < int2(g_crop_w, g_crop_h));
         Out[id.xy] = inside ? PassView(g_pass_debug, InputAtlas[uint2(q)], Answer[uint2(q)])
                             : float4(base.rgb * 0.3, base.a);
@@ -51,7 +51,7 @@ void main(uint3 id : SV_DispatchThreadID)
     }
     float4 result = float4(saturate(base.rgb + Offset(OffsetPeriphery, uv)), base.a);
 
-    int2 c = (int2)id.xy - int2(g_crop_x, g_crop_y);
+    int2 c = (int2)id.xy - int2(CropOrigin());
     int2 size = int2(g_crop_w, g_crop_h);
     if (all(c >= 0) && all(c < size))
     {

@@ -45,6 +45,7 @@
 #include "../build/shaders/fov_split_low_dxil.h"
 #include "../build/shaders/fov_split_blur_dxil.h"
 #include "../build/shaders/fov_split_expand_dxil.h"
+#include "../build/shaders/fov_split_crop_dxil.h"
 
 namespace fov {
 
@@ -108,6 +109,10 @@ struct Gaze {
 
 inline Gaze gaze;
 
+// The newest gaze point for the GPU: the crop pass (fov_split_crop) reads it from this mapped upload
+// buffer when it runs, so the crop follows the eye as of execution, not as of recording.
+inline std::atomic<volatile uint64_t*> gaze_gpu{nullptr};
+
 inline DWORD WINAPI GazeThread(LPVOID) {
   char buf[64];
   while (!gaze.stop.load(std::memory_order_relaxed)) {
@@ -120,6 +125,7 @@ inline DWORD WINAPI GazeThread(LPVOID) {
         std::memcpy(&v, xy, 8);
         gaze.packed.store(v, std::memory_order_relaxed);
         gaze.last_tick.store(GetTickCount64(), std::memory_order_relaxed);
+        if (volatile uint64_t* m = gaze_gpu.load(std::memory_order_acquire)) *m = v;   // one aligned store
       }
     }
     // n <= 0: the 200 ms receive timeout, so the stop flag is seen promptly.
@@ -257,8 +263,15 @@ struct State {
   bool hist_valid = false;
   uint32_t render_w = 0, render_h = 0;   // the motion vectors' size and scale, for the history
   float mv_x = 1.0f, mv_y = 1.0f;
-  uint32_t crop_x = 0, crop_y = 0;
+  uint32_t crop_x = 0, crop_y = 0;   // the CPU's estimate (logs, dumps); the GPU's is crop_state
   int prev_crop_x = -1, prev_crop_y = -1;
+  // Split: the crop pass -- its root signature (root SRV gaze, root UAV state, constants), the mapped
+  // gaze buffer, and the crop state (4 floats: origin, previous origin), which stays
+  // NON_PIXEL_SHADER_RESOURCE between frames.
+  ID3D12RootSignature* crop_root = nullptr;
+  ID3D12PipelineState* crop_pso = nullptr;
+  ID3D12Resource* gaze_buf = nullptr;
+  ID3D12Resource* crop_state = nullptr;
 
   // This frame's mapping, and the one the previous frame used.
   Axis x, y;
@@ -292,6 +305,9 @@ inline void Release() {
     if (r != nullptr) r->Release();
   for (auto* p : g.split_pso)
     if (p != nullptr) p->Release();
+  gaze_gpu.store(nullptr);
+  for (IUnknown* u : {(IUnknown*)g.crop_pso, (IUnknown*)g.crop_root, (IUnknown*)g.gaze_buf, (IUnknown*)g.crop_state})
+    if (u != nullptr) u->Release();
   for (auto*& r : g.lut)
     if (r != nullptr) r->Release();
   for (auto& gr : g.graves)
@@ -533,13 +549,28 @@ struct View {
   DXGI_FORMAT fallback;   // the view format when r is null
 };
 
+// The crop state where split passes read it (t3: CropOrigin() in fov_common.hlsli).
+inline void CropSrv(ID3D12Device* d, uint32_t i) {
+  D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+  v.Format = DXGI_FORMAT_UNKNOWN;
+  v.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+  v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  v.Buffer.NumElements = 4;
+  v.Buffer.StructureByteStride = 4;
+  d->CreateShaderResourceView(g.crop_state, &v, Cpu(i));
+}
+
+// `crop`: t3 is the crop state instead of the squeeze's tables (every split pass, and the split
+// debug view).
 inline void Bind(ID3D12Device* device, ID3D12GraphicsCommandList* cmd, ID3D12PipelineState* pso,
                  uint32_t frame, Pass pass, const View (&srv)[5], const View (&uav)[3],
-                 const uint32_t* constants) {
+                 const uint32_t* constants, bool crop = false) {
   const uint32_t base = ((frame % kRingSize) * kPasses + pass) * kSlotsPerPass;
   const uint32_t reg[5] = {0, 1, 2, 4, 5};
   for (int i = 0; i < 5; ++i) Srv(device, base + reg[i], srv[i].r, srv[i].fallback);
-  LutSrv(device, base + 3, frame);
+  crop = crop || (pass >= kSplitSqueeze && pass <= kSplitExpand);
+  if (crop && g.crop_state != nullptr) CropSrv(device, base + 3);
+  else LutSrv(device, base + 3, frame);
   for (int i = 0; i < 3; ++i) Uav(device, base + 6 + i, uav[i].r, uav[i].fallback);
   cmd->SetDescriptorHeaps(1, &g.heap);
   cmd->SetComputeRootSignature(g.root_sig);
@@ -691,7 +722,7 @@ inline void DebugMap(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame_res, 
   cmd->ResourceBarrier(1, &uav);   // after the resolve's writes
   Bind(device, cmd, g.debug_pso, frame, kDebug,
        {{nullptr, kRgba}, {nullptr, kR32}, {nullptr, kRg16}, {nullptr, kRgba}, {nullptr, kRgba}},
-       {{frame_res, DXGI_FORMAT_UNKNOWN}, {nullptr, kR32}, {nullptr, kRg16}}, c);
+       {{frame_res, DXGI_FORMAT_UNKNOWN}, {nullptr, kR32}, {nullptr, kRg16}}, c, split);
   cmd->Dispatch((full_w + 7) / 8, (full_h + 7) / 8, 1);
   device->Release();
 }
@@ -741,6 +772,77 @@ inline void SplitConstants(uint32_t* c, const SplitLayout& l, uint32_t full_w, u
   std::memcpy(&c[26], &settings.grade_blur, 4);
 }
 
+// The crop pass's objects: its root signature ([0] root SRV t0 gaze, [1] root UAV u0 state,
+// [2] constants), pipeline, the mapped gaze buffer and the crop state.
+inline bool EnsureCrop(ID3D12Device* device) {
+  if (g.crop_pso != nullptr) return true;
+  D3D12_ROOT_PARAMETER params[3] = {};
+  params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+  params[0].Descriptor = {0, 0};
+  params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+  params[1].Descriptor = {0, 0};
+  params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  params[2].Constants = {0, 0, 9};
+  D3D12_ROOT_SIGNATURE_DESC desc = {3, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  ID3DBlob* blob = nullptr;
+  ID3DBlob* error = nullptr;
+  if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error))) {
+    if (error != nullptr) error->Release();
+    return false;
+  }
+  const HRESULT hr = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
+                                                 IID_PPV_ARGS(&g.crop_root));
+  blob->Release();
+  if (FAILED(hr)) return false;
+  D3D12_COMPUTE_PIPELINE_STATE_DESC pso = {};
+  pso.pRootSignature = g.crop_root;
+  pso.CS = {fov_split_crop_dxil, sizeof(fov_split_crop_dxil)};
+  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.crop_pso)))) return false;
+
+  D3D12_RESOURCE_DESC b = {};
+  b.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  b.Width = 256;
+  b.Height = b.DepthOrArraySize = b.MipLevels = 1;
+  b.SampleDesc.Count = 1;
+  b.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES up = {D3D12_HEAP_TYPE_UPLOAD}, def = {D3D12_HEAP_TYPE_DEFAULT};
+  if (FAILED(device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &b, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                             nullptr, IID_PPV_ARGS(&g.gaze_buf))))
+    return false;
+  b.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &b,
+                                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                             IID_PPV_ARGS(&g.crop_state))))
+    return false;
+  const D3D12_RANGE none = {0, 0};
+  void* m = nullptr;
+  if (FAILED(g.gaze_buf->Map(0, &none, &m))) return false;
+  const uint64_t v = gaze.packed.load(std::memory_order_relaxed);
+  *static_cast<volatile uint64_t*>(m) = v;
+  gaze_gpu.store(static_cast<volatile uint64_t*>(m), std::memory_order_release);
+  return true;
+}
+
+// Record the crop pass: the crop state from the newest gaze when it runs (NON_PIXEL_SHADER_RESOURCE
+// before and after). `reset`: no hold and no previous origin (first frame, a new layout).
+inline void CropPass(ID3D12GraphicsCommandList* cmd, const SplitLayout& l, uint32_t full_w, uint32_t full_h,
+                     bool reset) {
+  float gx, gy;
+  const bool use_gaze = settings.gaze_source == 1 && GazeLatest(&gx, &gy);
+  uint32_t c[9] = {full_w, full_h, l.crop_w, l.crop_h, (uint32_t)settings.crop_snap, reset ? 1u : 0u,
+                   use_gaze ? 1u : 0u, 0, 0};
+  std::memcpy(&c[7], &g.centre_x, 4);
+  std::memcpy(&c[8], &g.centre_y, 4);
+  Barrier(cmd, g.crop_state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  cmd->SetComputeRootSignature(g.crop_root);
+  cmd->SetPipelineState(g.crop_pso);
+  cmd->SetComputeRootShaderResourceView(0, g.gaze_buf->GetGPUVirtualAddress());
+  cmd->SetComputeRootUnorderedAccessView(1, g.crop_state->GetGPUVirtualAddress());
+  cmd->SetComputeRoot32BitConstants(2, 9, c, 0);
+  cmd->Dispatch(1, 1, 1);
+  Barrier(cmd, g.crop_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+}
+
 // Split mode's Squeeze: place the crop at the gaze and fill the atlas. Same contract as Squeeze
 // (leaves proxy_s, depth_s and motion_s NON_PIXEL_SHADER_RESOURCE; g.x.work/g.y.work = the atlas).
 inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D12Resource* depth,
@@ -770,8 +872,9 @@ inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, 
   const bool same_layout = g.x.full == full_w && g.y.full == full_h && g.x.work == l.work_w && g.y.work == l.work_h;
   g.crop_x = origin(g.centre_x, l.crop_w, full_w, same_layout ? g.prev_crop_x : -1);
   g.crop_y = origin(g.centre_y, l.crop_h, full_h, same_layout ? g.prev_crop_y : -1);
-  if (g.prev_crop_x < 0 || g.x.full != full_w || g.y.full != full_h || g.x.work != l.work_w ||
-      g.y.work != l.work_h) {
+  const bool layout_reset = g.prev_crop_x < 0 || g.x.full != full_w || g.y.full != full_h ||
+                            g.x.work != l.work_w || g.y.work != l.work_h;
+  if (layout_reset) {
     g.prev_crop_x = (int)g.crop_x;   // first frame, or a new layout: start the history over
     g.prev_crop_y = (int)g.crop_y;
     g.reset = true;
@@ -794,6 +897,12 @@ inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, 
     device->Release();
     return false;
   }
+
+  if (!EnsureCrop(device)) {
+    device->Release();
+    return false;
+  }
+  CropPass(cmd, l, full_w, full_h, layout_reset);
 
   uint32_t c[kConstants] = {};
   SplitConstants(c, l, full_w, full_h, render_w, render_h, mv_scale_x, mv_scale_y);

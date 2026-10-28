@@ -22,7 +22,7 @@ void main(uint3 id : SV_DispatchThreadID)
     float area;
     if (g_crop_w > 0)
     {
-        int2 c = (int2)id.xy - int2(g_crop_x, g_crop_y);
+        int2 c = (int2)id.xy - int2(CropOrigin());
         area = all(c >= 0) && all(c < int2(g_crop_w, g_crop_h)) ? 1.0 : 0.0625;
     }
     else

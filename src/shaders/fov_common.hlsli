@@ -50,6 +50,11 @@ cbuffer FovConstants : register(b0)
     uint g_pass_debug;     // split expand: 0 off, 1-3 the fovea pass alone, 4-6 the periphery pass alone
 };
 
+// Split mode: the crop's origin this frame and last, in full pixels, as fov_split_crop placed it on
+// the GPU from the newest gaze. Bound where the squeeze's tables go, which split mode does not use.
+float2 CropOrigin() { return float2(Lut[0], Lut[1]); }
+float2 PrevCropOrigin() { return float2(Lut[2], Lut[3]); }
+
 // Continuous lookup into a per-pixel-centre table: pos is a coordinate in that table's space
 // (pixel centres at i + 0.5), clamped to its ends.
 float LutAt(uint base, uint count, float pos)

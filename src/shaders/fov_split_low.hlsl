@@ -34,7 +34,7 @@ void main(uint3 id : SV_DispatchThreadID)
     float2 inv_full = 1.0 / float2(g_full_w, g_full_h);
     float2 lo = 0.5, hi = float2(g_crop_w, g_crop_h) - 0.5;
     float2 o = scale * 0.25;
-    float2 origin = float2(g_crop_x, g_crop_y);
+    float2 origin = CropOrigin();
     float3 sum = 0;
     [unroll] for (int i = 0; i < 4; ++i)
     {
