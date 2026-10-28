@@ -209,6 +209,9 @@ struct State {
 };
 
 inline State s;
+// Set by the add-on: polls dlssnr-linux-live.ini (throttled). Called from every evaluate as well as the
+// host's present, since the host may stop presenting (its window hidden) while frames still evaluate.
+inline void (*poll_live)() = nullptr;
 
 // The size of the picture the pass works on, for the current mode. Before the upscale only means
 // something when DLSS-SR really upscales; at DLAA (input = output size) both modes are the same.
@@ -693,6 +696,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   float wp = (s.wp_ema > 0.0f) ? s.wp_ema : 1.0f;
   wp = (wp < 0.01f ? 0.01f : (wp > 1000.0f ? 1000.0f : wp)) * s.wp_scale;
 
+  if (poll_live != nullptr) poll_live();
   diag::Poll(s.eval_count, s.game_dir, ngx_probe::Log);
   diag::Begin(cmd, s.eval_count, ngx_probe::Log);
 

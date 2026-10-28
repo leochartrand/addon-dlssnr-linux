@@ -533,7 +533,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       LogWineVersion();
       LoadSettings();
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
-      reshade::register_event<reshade::addon_event::present>(OnPresent);
+    nr_runner::poll_live = PollLiveSettings;
+    reshade::register_event<reshade::addon_event::present>(OnPresent);
       reshade::register_overlay("DLSSNR Linux", OnDrawOverlay);
       ngx_probe::TryInstall();  // in case NGX is already resident
       break;
