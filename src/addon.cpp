@@ -146,9 +146,6 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
   reshade::get_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
-  reshade::get_config_value(nullptr, kConfigSection, "Relight", f.relight);
-  reshade::get_config_value(nullptr, kConfigSection, "RelightDarkenOnly", f.relight_mode);
-  reshade::get_config_value(nullptr, kConfigSection, "SkyNoRelight", f.sky_no_relight);
   reshade::get_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::get_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::get_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
@@ -186,9 +183,7 @@ void LoadSettings() {
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
   f.jump_reset = Clamp(f.jump_reset, 0.02f, 2.0f);
   f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
-  f.grade_blur = Clamp(f.grade_blur, 0.0f, 16.0f);
-  f.relight = Clamp(f.relight, 0.0f, 1.0f);
-  f.relight_mode = f.relight_mode != 0 ? 1 : 0;
+  f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
   f.tone_deadband = Clamp(f.tone_deadband, 0.0f, 0.1f);
@@ -232,9 +227,6 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
   reshade::set_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
-  reshade::set_config_value(nullptr, kConfigSection, "Relight", f.relight);
-  reshade::set_config_value(nullptr, kConfigSection, "RelightDarkenOnly", f.relight_mode);
-  reshade::set_config_value(nullptr, kConfigSection, "SkyNoRelight", f.sky_no_relight);
   reshade::set_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::set_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::set_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
@@ -326,9 +318,6 @@ void PollLiveSettings() {
   f.split = LiveInt(path, "FoveaSplit", f.split ? 1 : 0) != 0;
   f.global_scale = LiveFloat(path, "GlobalScale", f.global_scale);
   f.grade_blur = LiveFloat(path, "GradeBlur", f.grade_blur);
-  f.relight = LiveFloat(path, "Relight", f.relight);
-  f.relight_mode = LiveInt(path, "RelightDarkenOnly", f.relight_mode);
-  f.sky_no_relight = LiveInt(path, "SkyNoRelight", f.sky_no_relight ? 1 : 0) != 0;
   f.split_calls = LiveInt(path, "SplitCalls", f.split_calls);
   f.tone_smoothing = LiveFloat(path, "ToneSmoothing", f.tone_smoothing);
   f.tone_deadband = LiveFloat(path, "ToneDeadband", f.tone_deadband);
@@ -370,9 +359,7 @@ void PollLiveSettings() {
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
   f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
-  f.grade_blur = Clamp(f.grade_blur, 0.0f, 16.0f);
-  f.relight = Clamp(f.relight, 0.0f, 1.0f);
-  f.relight_mode = f.relight_mode != 0 ? 1 : 0;
+  f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
   f.tone_deadband = Clamp(f.tone_deadband, 0.0f, 0.1f);
@@ -476,14 +463,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   changed |= ImGui::Checkbox("Split: full-res crop + low-res frame for the tone", &f.split);
   if (f.split) {
     changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
-    changed |= SliderWithReset("Tone blur", &f.grade_blur, 0.0f, 16.0f, "%.1f px", 1.0f);
-    changed |= SliderWithReset("Relighting kept (0 = details only)", &f.relight, 0.0f, 1.0f, "%.2f", 1.0f);
-    bool darken = f.relight_mode != 0;
-    if (ImGui::Checkbox("Relighting may only darken (no colour; ambient occlusion-like)", &darken)) {
-      f.relight_mode = darken ? 1 : 0;
-      changed = true;
-    }
-    changed |= ImGui::Checkbox("No relighting on the sky (depth at the far plane)", &f.sky_no_relight);
+    changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
     bool two = f.split_calls == 2;
     if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
       f.split_calls = two ? 2 : 1;

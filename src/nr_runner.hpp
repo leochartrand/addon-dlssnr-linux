@@ -103,7 +103,7 @@ using PFN_GetCapabilityParams = int(__cdecl*)(NVSDK_NGX_Parameter**);
 constexpr uint32_t kFullLogs = 3;        // first evals logged in full
 constexpr uint32_t kHeartbeatEvery = 600;
 constexpr uint32_t kMaxFailStreak = 3;   // consecutive eval failures before the pass disables itself
-constexpr int kGraveyardFrames = 240;    // frames a retired resource waits before release
+constexpr int kGraveyardFrames = 16;     // frames a retired resource waits before release (frames in flight: <= 3)
 
 struct Grave {
   ID3D12Resource* resource = nullptr;
@@ -364,9 +364,9 @@ inline void LogModelIdentityAsync(const wchar_t* model_path) {
 // --- lifetime ------------------------------------------------------------
 
 // The GPU may still be executing command lists that reference a retired feature or texture, so
-// they wait in the graveyard for a couple hundred frames before release. The graveyard grows as
-// needed: releasing early instead used to free a texture the GPU was still reading -- three quick
-// Apply presses overflowed the old fixed 8 slots and killed the device (issue #1).
+// they wait in the graveyard for kGraveyardFrames frames before release -- several times the frames in
+// flight. The graveyard grows as needed: releasing early instead used to free a texture the GPU was still
+// reading -- three quick Apply presses overflowed the old fixed 8 slots and killed the device (issue #1).
 inline void Bury(ID3D12Resource* resource, void* feature) {
   if (resource == nullptr && feature == nullptr) return;
   for (auto& g : s.graveyard) {
@@ -836,9 +836,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
-    // Relighting kept = 0 (details only): the periphery shows the game's frame and the crop keeps only its
-    // fine detail, so the whole-frame call has nothing to give and is skipped.
-    if (result == 1 && global_fresh && fov::settings.periphery_pass && fov::settings.relight > 0.0f) {
+    if (result == 1 && global_fresh && fov::settings.periphery_pass) {
       if (every > 1) reset = 1;
       result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
     }
@@ -873,7 +871,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   }
   s.fail_streak = 0;
   diag::Mark(cmd, diag::kModel);
-  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, depth, depth_inverted, frame, global_fresh);
+  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
   else if (foveated) fov::Expand(cmd, s.output, frame);
   diag::Mark(cmd, diag::kExpand);
 
@@ -947,6 +945,12 @@ inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
       RetireFeature("split calls changed");
   }
   if (!EnsureSetup(cmd)) return false;
+  // A rebuild waits for the retired features to be released: creating the new ones beside them doubled the
+  // NGX memory for the graveyard's lifetime, and at full resolution that overflowed VRAM and the driver kept
+  // spilling to system memory for the rest of the session. The pass sits out those few frames instead.
+  if (s.feature == nullptr)
+    for (const auto& g : s.graveyard)
+      if (g.feature != nullptr) return false;
   return EnsureFeature(cmd);
 }
 

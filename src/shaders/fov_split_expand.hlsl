@@ -12,7 +12,6 @@ Texture2D<float4> Proxy : register(t1);
 Texture2D<float4> OffsetPeriphery : register(t2);
 Texture2D<float4> OffsetFovea : register(t4);
 Texture2D<float4> InputAtlas : register(t5);   // what the model was given: crop and low-res frame
-Texture2D<float> Depth : register(t6);         // the game's depth, render size
 RWTexture2D<float4> Out : register(u0);
 
 float4 PassView(uint view, float4 seen, float4 answer)
@@ -84,15 +83,6 @@ void main(uint3 id : SV_DispatchThreadID)
     bool in_crop = all(c >= 0) && all(c < size);
     float3 off_periphery, off_fovea;
     Offsets(uv, base.rgb, in_crop, off_periphery, off_fovea);
-    // SkyNoRelight: no broad change where the depth is at the far plane (the sky, in games that draw it
-    // there): the model's blotches and tints in the sky, and the dark bands along the skyline.
-    float2 to_render = float2(g_render_w, g_render_h) / float2(g_full_w, g_full_h);
-    uint2 rp = min((uint2)(((float2)id.xy + 0.5) * to_render), uint2(g_render_w - 1, g_render_h - 1));
-    float z = Depth[rp];
-    float sky = g_depth_inverted != 0 ? 1.0 - smoothstep(0.0, 1e-5, z) : smoothstep(1.0 - 1e-5, 1.0, z);
-    sky *= g_sky_no_relight != 0 ? 1.0 : 0.0;
-    off_fovea -= sky * off_periphery;    // the crop keeps its fine detail, without the broad change
-    off_periphery *= 1.0 - sky;
     float4 result = float4(saturate(base.rgb + off_periphery), base.a);
 
     if (in_crop)
