@@ -6,7 +6,9 @@
 //   engine in:  an atlas region (the display-referred proxy, RGBA16F) -> the engine's input image,
 //               float32 [3, field] at k/255, mirrored out to the field              (engine_in)
 //   engine:     the recorded launches, a UAV barrier after each
-//   engine out: the engine's composed frame -> the same region of the answer atlas  (engine_out)
+//   engine out: the engine's composed frame -> the same region of a raw answer atlas (engine_out)
+//   history:    once both regions ran, the change the model made (raw - input) blended with last
+//               frame's, reprojected and clamped -> the answer atlas            (engine_temporal)
 //
 // The program lives in <exe dir>\nr-engine (program.txt, kernels\, segments\). It is loaded on a
 // thread of its own (about 1 GB of buffers); until it is ready the NGX feature keeps running.
@@ -31,6 +33,7 @@
 
 #include "../build/shaders/engine_in_dxil.h"
 #include "../build/shaders/engine_out_dxil.h"
+#include "../build/shaders/engine_temporal_dxil.h"
 
 namespace nr_engine {
 
@@ -46,7 +49,9 @@ constexpr uint32_t kNvCreateCubinEx = 0x3151211b;   // NvAPI_D3D12_CreateCubinCo
 constexpr uint32_t kNvLaunchCubin = 0x5c52bb86;     // NvAPI_D3D12_LaunchCubinShader
 
 constexpr uint32_t kRingSize = 8;       // frames of descriptors in flight
-constexpr uint32_t kConstants = 6;      // EngineConstants in engine_in/out.hlsl
+constexpr uint32_t kConstants = 15;     // EngineConstants in engine_temporal.hlsl (in/out read the first 6)
+constexpr uint32_t kUses = 5;           // descriptor sets per frame: in and out of two runs, the history pass
+constexpr uint32_t kSlots = 6;          // t0-t3, u1-u2
 constexpr uint64_t kStaging = 64ull << 20;
 
 enum Status : int { kIdle, kLoading, kReady, kFailed };
@@ -95,8 +100,19 @@ struct State {
   ID3D12RootSignature* root_sig = nullptr;
   ID3D12PipelineState* in_pso = nullptr;
   ID3D12PipelineState* out_pso = nullptr;
+  ID3D12PipelineState* temporal_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t descriptor_size = 0;
+
+  // Atlas-sized textures (UNORDERED_ACCESS between passes): the engine's raw answers and the
+  // change history, ping-ponged.
+  ID3D12Resource* raw = nullptr;
+  ID3D12Resource* hist[2] = {};
+  uint32_t atlas_w = 0, atlas_h = 0;
+  uint32_t flip = 0;
+  bool hist_valid = false;
+  struct Grave { ID3D12Resource* r; int frames; };
+  std::vector<Grave> graves;
 };
 
 inline State g;
@@ -236,11 +252,11 @@ inline D3D12_RESOURCE_DESC BufferDesc(uint64_t size, bool uav) {
   return d;
 }
 
-// The copy pipelines: [0] SRV table t0 (the atlas), [1] UAV table u1 (the answer atlas), [2] root UAV
-// u0 (the engine's image or frame), [3] constants b0.
+// The pipelines around the engine: [0] SRV table t0-t3, [1] UAV table u1-u2, [2] root UAV u0 (the
+// engine's image or frame), [3] constants b0, static linear s0.
 inline bool CreatePipelines(ID3D12Device* device) {
-  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0};
-  D3D12_DESCRIPTOR_RANGE uav = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 1, 0, 0};
+  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 4, 0, 0, 0};
+  D3D12_DESCRIPTOR_RANGE uav = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 2, 1, 0, 0};
   D3D12_ROOT_PARAMETER params[4] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
   params[0].DescriptorTable = {1, &srv};
@@ -250,7 +266,12 @@ inline bool CreatePipelines(ID3D12Device* device) {
   params[2].Descriptor = {0, 0};
   params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
   params[3].Constants = {0, 0, kConstants};
-  D3D12_ROOT_SIGNATURE_DESC desc = {4, params, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
+  D3D12_STATIC_SAMPLER_DESC sampler = {};
+  sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler.MaxLOD = D3D12_FLOAT32_MAX;
+  sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  D3D12_ROOT_SIGNATURE_DESC desc = {4, params, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_NONE};
   ID3DBlob* blob = nullptr;
   ID3DBlob* error = nullptr;
   if (FAILED(D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error))) {
@@ -267,7 +288,9 @@ inline bool CreatePipelines(ID3D12Device* device) {
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.in_pso)))) return false;
   pso.CS = {engine_out_dxil, sizeof(engine_out_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.out_pso)))) return false;
-  D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRingSize * 2 * 2,
+  pso.CS = {engine_temporal_dxil, sizeof(engine_temporal_dxil)};
+  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.temporal_pso)))) return false;
+  D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRingSize * kUses * kSlots,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&g.heap)))) return false;
   g.descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -425,51 +448,113 @@ inline const char* StatusText() {
   }
 }
 
-// One engine run on the region (x, y, w, h) of the atlas: `src` NON_PIXEL_SHADER_RESOURCE, `dst`
-// UNORDERED_ACCESS, both left so. The region fits the field; the rest of the field is its mirror.
-// `slot` tells this frame's runs apart (each has its own descriptors).
-inline bool Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* src, ID3D12Resource* dst, uint32_t x,
-                uint32_t y, uint32_t w, uint32_t h, uint32_t frame, uint32_t slot) {
-  const Program& p = g.prog;
-  if (g.status.load() != kReady || w > p.field_w || h > p.field_h || w == 0 || h == 0) return false;
-  ID3D12Device* device = nullptr;
-  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
+inline void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* r, D3D12_RESOURCE_STATES a,
+                    D3D12_RESOURCE_STATES b) {
+  D3D12_RESOURCE_BARRIER x = {};
+  x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  x.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, a, b};
+  cmd->ResourceBarrier(1, &x);
+}
 
-  const uint32_t base = ((frame % kRingSize) * 2 + (slot & 1)) * 2;
+// Textures the GPU may still be using wait out the descriptor ring before they are released.
+inline void TickGraves() {
+  for (size_t i = 0; i < g.graves.size();) {
+    if (--g.graves[i].frames > 0) { ++i; continue; }
+    g.graves[i].r->Release();
+    g.graves[i] = g.graves.back();
+    g.graves.pop_back();
+  }
+}
+
+inline bool EnsureTextures(ID3D12Device* device, uint32_t w, uint32_t h) {
+  if (g.raw != nullptr && g.atlas_w == w && g.atlas_h == h) return true;
+  for (ID3D12Resource** t : {&g.raw, &g.hist[0], &g.hist[1]}) {
+    if (*t != nullptr) g.graves.push_back({*t, (int)kRingSize + 2});
+    *t = nullptr;
+  }
+  D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_DEFAULT};
+  D3D12_RESOURCE_DESC desc = {};
+  desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  desc.Width = w;
+  desc.Height = h;
+  desc.DepthOrArraySize = desc.MipLevels = 1;
+  desc.SampleDesc.Count = 1;
+  desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  for (ID3D12Resource** t : {&g.raw, &g.hist[0], &g.hist[1]})
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                               IID_PPV_ARGS(t)))) {
+      Fail("history textures");
+      return false;
+    }
+  g.atlas_w = w;
+  g.atlas_h = h;
+  g.hist_valid = false;
+  return true;
+}
+
+// One use's descriptors (t0-t3 from `srv`, u1-u2 from `uav`; null entries read as zero), then the
+// pipeline, tables, root UAV and constants.
+inline void Bind(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12PipelineState* pso,
+                 uint32_t frame, uint32_t use, ID3D12Resource* const (&srv)[4],
+                 ID3D12Resource* const (&uav)[2], D3D12_GPU_VIRTUAL_ADDRESS root_uav,
+                 const uint32_t* constants) {
+  const uint32_t base = ((frame % kRingSize) * kUses + use) * kSlots;
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = g.heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_GPU_DESCRIPTOR_HANDLE gpu = g.heap->GetGPUDescriptorHandleForHeapStart();
   cpu.ptr += (SIZE_T)base * g.descriptor_size;
   gpu.ptr += (UINT64)base * g.descriptor_size;
-  D3D12_SHADER_RESOURCE_VIEW_DESC sv = {};
-  sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-  sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-  sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-  sv.Texture2D.MipLevels = 1;
-  device->CreateShaderResourceView(src, &sv, cpu);
-  D3D12_UNORDERED_ACCESS_VIEW_DESC uv = {};
-  uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-  uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-  D3D12_CPU_DESCRIPTOR_HANDLE cpu_uav = cpu;
-  cpu_uav.ptr += g.descriptor_size;
-  device->CreateUnorderedAccessView(dst, nullptr, &uv, cpu_uav);
-  device->Release();
+  for (int i = 0; i < 4; ++i) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+    v.Format = srv[i] != nullptr ? srv[i]->GetDesc().Format : DXGI_FORMAT_R16G16B16A16_FLOAT;
+    v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    v.Texture2D.MipLevels = 1;
+    D3D12_CPU_DESCRIPTOR_HANDLE h = cpu;
+    h.ptr += (SIZE_T)i * g.descriptor_size;
+    device->CreateShaderResourceView(srv[i], &v, h);
+  }
+  for (int i = 0; i < 2; ++i) {
+    D3D12_UNORDERED_ACCESS_VIEW_DESC v = {};
+    v.Format = uav[i] != nullptr ? uav[i]->GetDesc().Format : DXGI_FORMAT_R16G16B16A16_FLOAT;
+    v.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    D3D12_CPU_DESCRIPTOR_HANDLE h = cpu;
+    h.ptr += (SIZE_T)(4 + i) * g.descriptor_size;
+    device->CreateUnorderedAccessView(uav[i], nullptr, &v, h);
+  }
   D3D12_GPU_DESCRIPTOR_HANDLE gpu_uav = gpu;
-  gpu_uav.ptr += g.descriptor_size;
+  gpu_uav.ptr += 4ull * g.descriptor_size;
+  cmd->SetDescriptorHeaps(1, &g.heap);
+  cmd->SetComputeRootSignature(g.root_sig);
+  cmd->SetPipelineState(pso);
+  cmd->SetComputeRootDescriptorTable(0, gpu);
+  cmd->SetComputeRootDescriptorTable(1, gpu_uav);
+  cmd->SetComputeRootUnorderedAccessView(2, root_uav);
+  cmd->SetComputeRoot32BitConstants(3, kConstants, constants, 0);
+}
+
+// One engine run on the region (x, y, w, h) of the atlas `src` (NON_PIXEL_SHADER_RESOURCE, left so):
+// its answer lands in the same region of the raw atlas, for Temporal to finish. The region fits the
+// field; the rest of the field is its mirror. `use` tells this frame's two runs apart.
+inline bool Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* src, uint32_t x, uint32_t y, uint32_t w,
+                uint32_t h, uint32_t frame, uint32_t use) {
+  const Program& p = g.prog;
+  if (g.status.load() != kReady || w > p.field_w || h > p.field_h || w == 0 || h == 0) return false;
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
+  const D3D12_RESOURCE_DESC atlas = src->GetDesc();
+  if (use == 0) TickGraves();
+  if (!EnsureTextures(device, (uint32_t)atlas.Width, atlas.Height)) {
+    device->Release();
+    return false;
+  }
 
   D3D12_RESOURCE_BARRIER all = {};
   all.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;   // null resource: every UAV access before vs after
   const uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h};
-  auto bind = [&](ID3D12PipelineState* pso, uint32_t seg, uint64_t off) {
-    cmd->SetDescriptorHeaps(1, &g.heap);
-    cmd->SetComputeRootSignature(g.root_sig);
-    cmd->SetPipelineState(pso);
-    cmd->SetComputeRootDescriptorTable(0, gpu);
-    cmd->SetComputeRootDescriptorTable(1, gpu_uav);
-    cmd->SetComputeRootUnorderedAccessView(2, g.segs[seg]->GetGPUVirtualAddress() + off);
-    cmd->SetComputeRoot32BitConstants(3, kConstants, c, 0);
-  };
-
-  bind(g.in_pso, p.in_seg, p.in_off);
+  Bind(cmd, device, g.in_pso, frame, (use & 1) * 2, {src, nullptr, nullptr, nullptr}, {nullptr, nullptr},
+       g.segs[p.in_seg]->GetGPUVirtualAddress() + p.in_off, c);
   cmd->Dispatch((p.field_w + 7) / 8, (p.field_h + 7) / 8, 1);
   cmd->ResourceBarrier(1, &all);
   for (const Launch& L : p.launches) {
@@ -482,10 +567,43 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, ID3D12Resource* src, ID3D12Resou
     }
     cmd->ResourceBarrier(1, &all);
   }
-  bind(g.out_pso, p.out_seg, p.out_off);
+  Bind(cmd, device, g.out_pso, frame, (use & 1) * 2 + 1, {nullptr, nullptr, nullptr, nullptr}, {g.raw, nullptr},
+       g.segs[p.out_seg]->GetGPUVirtualAddress() + p.out_off, c);
   cmd->Dispatch((w + 7) / 8, (h + 7) / 8, 1);
   cmd->ResourceBarrier(1, &all);
+  device->Release();
   return true;
+}
+
+// After this frame's runs: the answer atlas (UNORDERED_ACCESS) = input + the model's change, blended
+// with the reprojected history. `proxy` and `motion` are the atlas inputs (NON_PIXEL_SHADER_RESOURCE);
+// `history` the weight of the history (0 = none); `reset` drops it; `low_ran` whether the low-res
+// region was run this frame (if not, it is left alone).
+inline void Temporal(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, ID3D12Resource* motion,
+                     ID3D12Resource* answer, uint32_t crop_w, uint32_t crop_h, uint32_t low_x,
+                     uint32_t low_w, uint32_t low_h, uint32_t frame, float history, bool reset,
+                     bool low_ran) {
+  ID3D12Device* device = nullptr;
+  if (g.raw == nullptr || FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+  constexpr auto kUav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  constexpr auto kSrv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  history = history < 0.0f ? 0.0f : (history > 0.95f ? 0.95f : history);
+  const float alpha = reset || !g.hist_valid ? 1.0f : 1.0f - history;
+  uint32_t c[kConstants] = {0, 0, 0, 0, g.prog.field_w, g.prog.field_h, crop_w, crop_h, low_x, low_w,
+                            low_h, 0, low_ran ? 1u : 0u, g.atlas_w, g.atlas_h};
+  std::memcpy(&c[11], &alpha, 4);
+  ID3D12Resource* const prev = g.hist[g.flip];
+  ID3D12Resource* const next = g.hist[g.flip ^ 1];
+  Barrier(cmd, g.raw, kUav, kSrv);
+  Barrier(cmd, prev, kUav, kSrv);
+  Bind(cmd, device, g.temporal_pso, frame, 4, {proxy, motion, prev, g.raw}, {answer, next},
+       g.segs[g.prog.in_seg]->GetGPUVirtualAddress(), c);
+  cmd->Dispatch((g.atlas_w + 7) / 8, (g.atlas_h + 7) / 8, 1);
+  Barrier(cmd, g.raw, kSrv, kUav);
+  Barrier(cmd, prev, kSrv, kUav);
+  device->Release();
+  g.flip ^= 1;
+  g.hist_valid = true;
 }
 
 }  // namespace nr_engine

@@ -1,5 +1,5 @@
 // The NR engine's output: its composed frame, float32 [3, field_h, field_w] -> the same region of the
-// answer atlas.
+// engine's raw answer atlas (engine_temporal turns it into the answer).
 RWByteAddressBuffer Frame : register(u0);
 RWTexture2D<float4> Dst : register(u1);
 

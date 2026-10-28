@@ -179,6 +179,9 @@ struct State {
   // Split in two calls: run both regions on our own engine (engine_runtime.hpp) instead of the NGX
   // features, which stay built for an instant A/B and as the fallback while the engine loads.
   bool engine = false;
+  // ...and how much of the engine's last answer (reprojected) carries into this frame's: it has no
+  // history of its own, so without this its answer can flicker. 0 = none.
+  float engine_history = 0.7f;
 
   // Geometry of the game's current DLSS-SR feature.
   unsigned render_w = 0, render_h = 0;
@@ -712,6 +715,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   unsigned guide_w = s.render_w, guide_h = s.render_h;
   // The mode is read once, so the expand below always matches the squeeze it follows.
   const bool split = fov::settings.split;
+  bool history_reset = false;   // the game's reset or a new layout, before any per-call resets
   if (foveated) {
     const bool squeezed = (split ? fov::SplitSqueeze : fov::Squeeze)(
         cmd, s.proxy, depth, motion, s.frame_w, s.frame_h, s.render_w, s.render_h, mv_scale_x,
@@ -738,6 +742,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     mv_scale_x = mv_scale_y = 1.0f;
     if (fov::g.reset) reset = 1;
     fov::g.reset = false;
+    history_reset = reset != 0;
   }
 
   diag::Mark(cmd, diag::kSqueeze);
@@ -783,7 +788,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     SetFloat(p, "DLSSNR.MVecScaleX", mv_scale_x);
     SetFloat(p, "DLSSNR.MVecScaleY", mv_scale_y);
     WriteTuning(p, feature == s.feature2);
-    if (use_engine && nr_engine::Run(cmd, in_color, answer, x, y, w, h, frame, feature == s.feature2 ? 1 : 0))
+    if (use_engine && nr_engine::Run(cmd, in_color, x, y, w, h, frame, feature == s.feature2 ? 1 : 0))
       return 1;
     return s.evaluate(cmd, feature, s.caps);
   };
@@ -797,10 +802,15 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     result = call(s.feature, 0, 0, l.crop_w, l.crop_h);
+    bool low_ran = false;
     if (result == 1 && global_fresh && fov::settings.periphery_pass) {
       if (every > 1) reset = 1;
       result = call(s.feature2, l.low_x, 0, l.low_w, l.low_h);
+      low_ran = true;
     }
+    if (result == 1 && use_engine)
+      nr_engine::Temporal(cmd, in_color, in_motion, answer, l.crop_w, l.crop_h, l.low_x, l.low_w, l.low_h,
+                          frame, s.engine_history, history_reset, low_ran);
   } else {
     result = call(s.feature, 0, 0, s.feature_w, s.feature_h);
   }
