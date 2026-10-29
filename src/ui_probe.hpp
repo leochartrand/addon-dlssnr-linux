@@ -1,6 +1,6 @@
 // ui-probe.request beside the exe: records the command stream of the next two frames into ui-probe.txt
 // -- per command list, each run of draws into one render target (its size, format and whether it is a
-// swapchain backbuffer, how many draws were full-screen and how many small, the first few vertex counts),
+// swapchain backbuffer, how many draws were full-screen and how many partial, the first few vertex counts),
 // compute dispatches, copies, the DLSS evaluate, and the order the lists were submitted in. It is how
 // the point where a game starts drawing its UI is found (the pass runs just before it).
 #pragma once
@@ -19,7 +19,7 @@ namespace ui_probe {
 
 struct Run {
   uint64_t rt = 0;
-  uint32_t full = 0, small = 0, dispatches = 0;
+  uint32_t full = 0, partial = 0, dispatches = 0;
   std::string first;   // the first few draws' vertex/index counts
 };
 
@@ -82,9 +82,9 @@ inline void Flush(reshade::api::command_list* cmd) {
   auto it = runs.find((uint64_t)cmd->get_native());
   if (it == runs.end()) return;
   Run& r = it->second;
-  if (r.full + r.small + r.dispatches > 0)
+  if (r.full + r.partial + r.dispatches > 0)
     Line("cl %llx  rt %s: %u full-screen, %u small, %u dispatches  first: %s", (unsigned long long)cmd->get_native(),
-         Describe(cmd->get_device(), r.rt).c_str(), r.full, r.small, r.dispatches, r.first.c_str());
+         Describe(cmd->get_device(), r.rt).c_str(), r.full, r.partial, r.dispatches, r.first.c_str());
   r = Run{r.rt};
 }
 
@@ -101,8 +101,8 @@ inline void Draw(reshade::api::command_list* cmd, uint32_t n) {
   if (!on) return;
   std::lock_guard<std::mutex> g(m);
   Run& r = runs[(uint64_t)cmd->get_native()];
-  (n <= 6 ? r.full : r.small)++;
-  if (r.full + r.small <= 6) r.first += std::to_string(n) + " ";
+  (n <= 6 ? r.full : r.partial)++;
+  if (r.full + r.partial <= 6) r.first += std::to_string(n) + " ";
 }
 
 inline bool OnDraw(reshade::api::command_list* cmd, uint32_t v, uint32_t, uint32_t, uint32_t) {
