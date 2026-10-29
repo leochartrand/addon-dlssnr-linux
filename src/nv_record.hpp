@@ -174,7 +174,7 @@ inline int32_t __cdecl HookLaunch(ID3D12GraphicsCommandList* cmd, void* shader, 
 // The replay test: the recorded chain launched on `cmd` as NVIDIA's runtime launched it, the frame counter
 // advanced (or held, with `hold`: the recorded frame again, for a bit-exact check), a UAV barrier after each launch
 // (the safe order; NVIDIA's runtime may overlap its chained kernels). False when there is nothing to replay.
-// Every buffer the device creates (ReShade's resource events): its GPU address range, so an address in a launch's
+// Every buffer whose address has been asked for (HookGva below): its GPU address range, so an address in a launch's
 // parameters can be traced to the buffer that holds it and copied out whole (DumpNV).
 struct Buffer {
   ID3D12Resource* res;
@@ -183,26 +183,50 @@ struct Buffer {
 inline std::vector<Buffer> buffers;
 inline std::mutex buffers_m;
 
-inline void OnInitResource(reshade::api::device* device, const reshade::api::resource_desc& desc,
-                           const reshade::api::subresource_data*, reshade::api::resource_usage,
-                           reshade::api::resource resource) {
-  if (desc.type != reshade::api::resource_type::buffer || device->get_api() != reshade::api::device_api::d3d12) return;
-  auto* r = reinterpret_cast<ID3D12Resource*>(resource.handle);
-  const uint64_t va = r != nullptr ? r->GetGPUVirtualAddress() : 0;
-  if (va == 0) return;
-  std::lock_guard<std::mutex> g(buffers_m);
-  buffers.push_back({r, va, desc.buffer.size});
+// ID3D12Resource::GetGPUVirtualAddress (vtable slot 11), detoured on the implementation the device uses: NVIDIA's
+// runtime asks each buffer for its address before naming it in a kernel's parameters, so each one passes here.
+using Gva = D3D12_GPU_VIRTUAL_ADDRESS(STDMETHODCALLTYPE*)(ID3D12Resource*);
+inline Gva real_gva = nullptr;
+
+inline D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE HookGva(ID3D12Resource* self) {
+  const D3D12_GPU_VIRTUAL_ADDRESS va = real_gva(self);
+  if (va != 0) {
+    const D3D12_RESOURCE_DESC d = self->GetDesc();
+    if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+      std::lock_guard<std::mutex> g(buffers_m);
+      bool known = false;
+      for (Buffer& b : buffers)
+        if (b.res == self) {
+          b.va = va;
+          b.size = d.Width;
+          known = true;
+        }
+      if (!known) buffers.push_back({self, va, d.Width});
+    }
+  }
+  return va;
 }
 
-inline void OnDestroyResource(reshade::api::device*, reshade::api::resource resource) {
-  std::lock_guard<std::mutex> g(buffers_m);
-  auto* r = reinterpret_cast<ID3D12Resource*>(resource.handle);
-  for (size_t i = 0; i < buffers.size(); ++i)
-    if (buffers[i].res == r) {
-      buffers[i] = buffers.back();
-      buffers.pop_back();
-      return;
-    }
+inline void OnInitDevice(reshade::api::device* device) {
+  if (real_gva != nullptr || device->get_api() != reshade::api::device_api::d3d12) return;
+  auto* d = reinterpret_cast<ID3D12Device*>(device->get_native());
+  D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_UPLOAD};
+  D3D12_RESOURCE_DESC rd = {};
+  rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  rd.Width = 256;
+  rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+  rd.SampleDesc.Count = 1;
+  rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  ID3D12Resource* probe = nullptr;
+  if (FAILED(d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                        IID_PPV_ARGS(&probe)))) return;
+  real_gva = reinterpret_cast<Gva>((*reinterpret_cast<void***>(probe))[11]);
+  probe->Release();
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<PVOID*>(&real_gva), reinterpret_cast<PVOID>(&HookGva));
+  const LONG r = DetourTransactionCommit();
+  ngx_probe::Logf("nv-record: GetGPUVirtualAddress hooked (%ld)", r);
 }
 
 inline const Buffer* Holding(uint64_t va) {
@@ -417,13 +441,18 @@ inline void Install(const char* game_dir) {
 }
 
 inline void Register() {
-  reshade::register_event<reshade::addon_event::init_resource>(OnInitResource);
-  reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
+  reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
 }
 
 inline void Unregister() {
-  reshade::unregister_event<reshade::addon_event::init_resource>(OnInitResource);
-  reshade::unregister_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
+  reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
+  if (real_gva != nullptr) {
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourDetach(reinterpret_cast<PVOID*>(&real_gva), reinterpret_cast<PVOID>(&HookGva));
+    DetourTransactionCommit();
+    real_gva = nullptr;
+  }
 }
 
 // On a real FreeLibrary of the add-on (ReShade cycles it while creating the device).
