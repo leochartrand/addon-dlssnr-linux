@@ -13,9 +13,12 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
+#include <d3d12.h>
 #include <detours.h>
 
 #include "ngx_probe.hpp"
@@ -58,6 +61,16 @@ inline std::atomic<int> requested{0};   // RecordNV: evaluates still to record
 inline thread_local bool in_nr = false;
 inline uint32_t evaluates = 0;
 
+// The last recorded evaluate's chain, for the replay test (ReplayNV): each launch's shader, grid and parameters.
+struct Recorded {
+  void* shader;
+  uint32_t gx, gy, gz;
+  std::vector<uint8_t> params;
+};
+inline std::vector<Recorded> chain, building;
+inline bool replay = false;      // ReplayNV=1: the runner launches the recorded chain itself instead of evaluating
+inline uint32_t counter = 0;     // the chain's frame counter (launch 1, offset 208: the noise seed)
+
 inline FILE* Open(const char* name, const char* mode) {
   return std::fopen((dir + name).c_str(), mode);
 }
@@ -69,6 +82,7 @@ struct Scope {
     if (!on) return;
     in_nr = true;
     std::lock_guard<std::mutex> g(m);
+    building.clear();
     if (FILE* f = Open("launches.txt", "a")) {
       std::fprintf(f, "E %u\n", evaluates++);
       std::fclose(f);
@@ -77,6 +91,11 @@ struct Scope {
   ~Scope() {
     if (!on) return;
     in_nr = false;
+    {
+      std::lock_guard<std::mutex> g(m);
+      if (!building.empty()) chain.swap(building);
+      if (chain.size() > 1 && chain[1].params.size() >= 212) std::memcpy(&counter, chain[1].params.data() + 208, 4);
+    }
     if (--requested <= 0) {
       requested = 0;
       ngx_probe::Log("nv-record: recording done");
@@ -128,6 +147,8 @@ inline int32_t __cdecl HookLaunch(ID3D12GraphicsCommandList* cmd, void* shader, 
                                   uint32_t gz, const void* params, uint32_t size) {
   if (in_nr) {
     std::lock_guard<std::mutex> g(m);
+    const auto* pb = static_cast<const uint8_t*>(params);
+    building.push_back({shader, gx, gy, gz, std::vector<uint8_t>(pb, pb + (pb != nullptr ? size : 0))});
     if (FILE* f = Open("launches.txt", "a")) {
       std::fprintf(f, "L %p %u %u %u %u ", shader, gx, gy, gz, size);
       const auto* b = static_cast<const uint8_t*>(params);
@@ -137,6 +158,26 @@ inline int32_t __cdecl HookLaunch(ID3D12GraphicsCommandList* cmd, void* shader, 
     }
   }
   return real_launch(cmd, shader, gx, gy, gz, params, size);
+}
+
+// The replay test: the recorded chain launched on `cmd` as NVIDIA's runtime launched it, the frame counter
+// advanced (or held, with `hold`: the recorded frame again, for a bit-exact check), a UAV barrier after each launch
+// (the safe order; NVIDIA's runtime may overlap its chained kernels). False when there is nothing to replay.
+inline bool Replay(ID3D12GraphicsCommandList* cmd, bool hold) {
+  std::lock_guard<std::mutex> g(m);
+  if (chain.empty() || real_launch == nullptr) return false;
+  if (!hold) ++counter;
+  D3D12_RESOURCE_BARRIER all = {};
+  all.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  std::vector<uint8_t> p;
+  for (size_t i = 0; i < chain.size(); ++i) {
+    const Recorded& r = chain[i];
+    p = r.params;
+    if (i == 1 && p.size() >= 212) std::memcpy(p.data() + 208, &counter, 4);
+    if (real_launch(cmd, r.shader, r.gx, r.gy, r.gz, p.data(), (uint32_t)p.size()) != 0) return false;
+    cmd->ResourceBarrier(1, &all);
+  }
+  return true;
 }
 
 inline void* __cdecl HookQuery(uint32_t id) {

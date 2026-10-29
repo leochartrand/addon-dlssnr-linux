@@ -889,6 +889,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
         return 1;
     }
     if (feature == nullptr) return 0;   // parked: the engine was to run this one
+    // ReplayNV (test): the whole frame through the recorded chain of NVIDIA's kernels, launched here.
+    if (nv_record::replay && !foveated && nv_record::Replay(cmd, s.force_reset)) return 1;
     nv_record::Scope recording;   // RecordNV: NVIDIA's launches inside this evaluate
     return s.evaluate(cmd, feature, s.caps);
   };

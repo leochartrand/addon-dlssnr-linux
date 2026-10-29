@@ -406,6 +406,7 @@ void PollLiveSettings() {
       if (v > 0) nv_record::requested = v;
     }
   }
+  nv_record::replay = LiveInt(path, "ReplayNV", nv_record::replay ? 1 : 0) != 0;
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
