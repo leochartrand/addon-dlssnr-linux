@@ -10,9 +10,9 @@
 // 2 = its raw answer, 3 = what it changed, amplified twenty times -- flat grey means nothing.
 #include "nr_common.hlsli"
 
-Texture2D<float3> Orig : register(t0);
+Texture2D<float4> Orig : register(t0);
 Texture2D<float3> Model : register(t1);
-RWTexture2D<float3> Out : register(u0);
+RWTexture2D<float4> Out : register(u0);   // alpha: the original's, kept (the game may composite with it)
 
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID)
@@ -24,13 +24,15 @@ void main(uint3 id : SV_DispatchThreadID)
     // picture, as NVIDIA's integration has it (debug views as below; transfer 0 is still a bypass).
     if (g_ldr != 0)
     {
-        const float3 shown = saturate(Orig[id.xy]);
+        const float4 orig = Orig[id.xy];
+        const float3 shown = saturate(orig.rgb);
         const float3 raw = Model[id.xy];
         const float3 answer = select(raw == raw, saturate(raw), shown);   // NaN guard
-        if (g_debug == 1) Out[id.xy] = shown;
-        else if (g_debug == 2) Out[id.xy] = answer;
-        else if (g_debug == 3) Out[id.xy] = saturate(abs(answer - shown) * 20.0);
-        else Out[id.xy] = lerp(shown, answer, g_transfer);
+        float3 rgb = lerp(shown, answer, g_transfer);
+        if (g_debug == 1) rgb = shown;
+        else if (g_debug == 2) rgb = answer;
+        else if (g_debug == 3) rgb = saturate(abs(answer - shown) * 20.0);
+        Out[id.xy] = float4(rgb, orig.a);
         return;
     }
 

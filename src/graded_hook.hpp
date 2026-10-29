@@ -9,11 +9,12 @@
 // over it (The Witcher 3); the pass runs at whichever comes first -- a small draw into the frame, or the
 // frame's render target being switched away. Once per frame.
 //
-// The pass records straight on the native command list, under ReShade. Afterwards the game's state that
-// the pass changes is put back through ReShade's own API, which knows the game's descriptor heaps: the
-// heaps (a zero-table bind re-issues them), the PSO, and the descriptor tables bound since the evaluate
-// (the game must re-bind after an evaluate anyway, so nothing bound before it can still be in use). The
-// pass touches no graphics root signature, render target, viewport or vertex input.
+// The pass records on the command list the game itself holds -- ReShade's proxy, the same object the DLSS
+// evaluate is given -- so ReShade sees every call it makes. Afterwards the game's state that the pass
+// changes is put back through ReShade's own API: the descriptor tables bound since the evaluate (with them
+// the game's descriptor heaps), the compute root signature and the PSO (the game must re-bind after an
+// evaluate anyway, so nothing bound before it can still be in use). The pass touches no graphics root
+// signature, render target, viewport or vertex input.
 #pragma once
 
 #include <windows.h>
@@ -93,22 +94,36 @@ inline void OnDlssEvaluated() {
   armed = true;
 }
 
+// The game-facing list behind an add-on event's command_list: ReShade's D3D12 proxy derives from the D3D12
+// interface first and from its command_list_impl second, so the interface sits one pointer below. Checked
+// (its vtable lives in the same module as the event object's, and it answers to the proxy's own interface
+// ID with itself); nullptr when it cannot be confirmed.
+inline ID3D12GraphicsCommandList* ProxyOf(reshade::api::command_list* cmd) {
+  static constexpr GUID kProxy = {0x479B29E3, 0x9A2C, 0x11D0, {0xB6, 0x96, 0x00, 0xA0, 0xC9, 0x03, 0x48, 0x7A}};
+  auto* candidate = reinterpret_cast<ID3D12GraphicsCommandList*>(reinterpret_cast<char*>(cmd) - sizeof(void*));
+  HMODULE a = nullptr, b = nullptr;
+  const DWORD flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+  if (!GetModuleHandleExA(flags, *reinterpret_cast<LPCSTR*>(cmd), &a) ||
+      !GetModuleHandleExA(flags, *reinterpret_cast<LPCSTR*>(candidate), &b) || a != b)
+    return nullptr;
+  void* self = nullptr;
+  if (FAILED(candidate->QueryInterface(kProxy, &self)) || self == nullptr) return nullptr;
+  candidate->Release();
+  return self == candidate ? candidate : nullptr;
+}
+
 inline void Restore(reshade::api::command_list* cmd, const Tables& graphics_, const Tables& compute_, uint64_t pso_) {
   using reshade::api::shader_stage;
-  // Zero tables: ReShade re-issues the game's descriptor heaps (and sets this compute root signature, which
-  // the pass replaced anyway); the compute tables then go back on the game's compute root signature.
+  // ReShade binds each table's own descriptor heaps with it, and re-sets a root signature only when it
+  // differs from the one bound: the compute one (the pass replaced it) is set again, the graphics one (the
+  // pass never touches it) is not, so its root arguments survive. Graphics last: its heaps are the ones the
+  // game's next draw uses.
   const uint64_t compute_layout = compute_.layout;
-  if (compute_layout != 0) {
-    cmd->bind_descriptor_tables(shader_stage::all_compute, reshade::api::pipeline_layout{compute_layout}, 0, 0, nullptr);
+  if (compute_layout != 0)
     for (uint32_t i = 0; i < compute_.tables.size(); ++i)
       if (compute_.tables[i] != 0)
         cmd->bind_descriptor_tables(shader_stage::all_compute, reshade::api::pipeline_layout{compute_layout}, i, 1,
                                     reinterpret_cast<const reshade::api::descriptor_table*>(&compute_.tables[i]));
-  } else {
-    cmd->bind_descriptor_tables(shader_stage::all_compute, reshade::api::pipeline_layout{(uint64_t)nr_compose::c.root_sig},
-                                0, 0, nullptr);
-  }
-  // The graphics root signature is untouched, so its tables go back without resetting its root arguments.
   if (graphics_.layout != 0)
     for (uint32_t i = 0; i < graphics_.tables.size(); ++i)
       if (graphics_.tables[i] != 0)
@@ -135,7 +150,14 @@ inline void Trigger(reshade::api::command_list* cmd, const char* why) {
     compute_ = compute;
     pso_ = pso;
   }
-  auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
+  static bool proxy_logged = false;
+  ID3D12GraphicsCommandList* native = ProxyOf(cmd);
+  if (!proxy_logged) {
+    proxy_logged = true;
+    ngx_probe::Logf("graded: recording on %s", native != nullptr ? "the game's command list (ReShade's proxy)"
+                                                                  : "the native command list (proxy not confirmed)");
+  }
+  if (native == nullptr) native = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
   auto* scene_res = reinterpret_cast<ID3D12Resource*>(scene_);
   // The guides must be readable by compute; a state the game moved them to since the evaluate goes back.
   const nr_runner::Guides gd = nr_runner::graded_guides;
@@ -242,7 +264,7 @@ inline void OnPresent() {
     ++missed;
   }
   nr_runner::graded_guides_valid = false;
-  if (++presents % 600 == 0 && nr_runner::s.graded && nr_runner::s.enabled) {
+  if (++presents % 600 == 0 && ran + failed + missed > 0) {
     ngx_probe::Logf("graded: last 600 frames: pass ran %u, failed %u, graded frame not found %u", ran, failed, missed);
     ran = failed = missed = 0;
   }
