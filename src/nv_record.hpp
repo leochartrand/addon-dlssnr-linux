@@ -20,6 +20,7 @@
 
 #include <d3d12.h>
 #include <detours.h>
+#include <reshade.hpp>
 
 #include "diag.hpp"
 #include "ngx_probe.hpp"
@@ -173,6 +174,110 @@ inline int32_t __cdecl HookLaunch(ID3D12GraphicsCommandList* cmd, void* shader, 
 // The replay test: the recorded chain launched on `cmd` as NVIDIA's runtime launched it, the frame counter
 // advanced (or held, with `hold`: the recorded frame again, for a bit-exact check), a UAV barrier after each launch
 // (the safe order; NVIDIA's runtime may overlap its chained kernels). False when there is nothing to replay.
+// Every buffer the device creates (ReShade's resource events): its GPU address range, so an address in a launch's
+// parameters can be traced to the buffer that holds it and copied out whole (DumpNV).
+struct Buffer {
+  ID3D12Resource* res;
+  uint64_t va, size;
+};
+inline std::vector<Buffer> buffers;
+inline std::mutex buffers_m;
+
+inline void OnInitResource(reshade::api::device* device, const reshade::api::resource_desc& desc,
+                           const reshade::api::subresource_data*, reshade::api::resource_usage,
+                           reshade::api::resource resource) {
+  if (desc.type != reshade::api::resource_type::buffer || device->get_api() != reshade::api::device_api::d3d12) return;
+  auto* r = reinterpret_cast<ID3D12Resource*>(resource.handle);
+  const uint64_t va = r != nullptr ? r->GetGPUVirtualAddress() : 0;
+  if (va == 0) return;
+  std::lock_guard<std::mutex> g(buffers_m);
+  buffers.push_back({r, va, desc.buffer.size});
+}
+
+inline void OnDestroyResource(reshade::api::device*, reshade::api::resource resource) {
+  std::lock_guard<std::mutex> g(buffers_m);
+  auto* r = reinterpret_cast<ID3D12Resource*>(resource.handle);
+  for (size_t i = 0; i < buffers.size(); ++i)
+    if (buffers[i].res == r) {
+      buffers[i] = buffers.back();
+      buffers.pop_back();
+      return;
+    }
+}
+
+inline const Buffer* Holding(uint64_t va) {
+  for (const Buffer& b : buffers)
+    if (va >= b.va && va < b.va + b.size) return &b;
+  return nullptr;
+}
+
+// DumpNV=<k>: on the next replay, right after launch k (k >= the chain's length: after the last one, every buffer
+// any launch names), each buffer that launch's parameters point into is copied to a readback buffer; four replays
+// later they are written to nv-record\dump\<k>-<buffer address>.bin, and listed in dump\index.txt
+// ("<k> <param offset> <param value> <buffer address> <bytes>").
+inline int dump_requested = -1;
+struct Pending {
+  ID3D12Resource* readback;
+  uint64_t va, size;
+  int launch;
+};
+inline std::vector<Pending> dumps;
+inline int dump_wait = -1;
+
+inline void CopyOut(ID3D12GraphicsCommandList* cmd, int k, const std::vector<uint8_t>& params) {
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device)))) return;
+  std::lock_guard<std::mutex> g(buffers_m);
+  FILE* index = Open("dump\\index.txt", "a");
+  for (size_t off = 0; off + 8 <= params.size(); off += 8) {
+    uint64_t v = 0;
+    std::memcpy(&v, params.data() + off, 8);
+    const Buffer* b = v > 0x10000 ? Holding(v) : nullptr;
+    if (b == nullptr) continue;
+    bool seen = false;
+    for (const Pending& d : dumps) seen |= d.va == b->va && d.launch == k;
+    if (index != nullptr) std::fprintf(index, "%d %zu %llx %llx %llu\n", k, off, (unsigned long long)v,
+                                       (unsigned long long)b->va, (unsigned long long)b->size);
+    if (seen) continue;
+    D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_READBACK};
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = b->size;
+    rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ID3D12Resource* rb = nullptr;
+    if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                               IID_PPV_ARGS(&rb)))) continue;
+    cmd->CopyBufferRegion(rb, 0, b->res, 0, b->size);
+    dumps.push_back({rb, b->va, b->size, k});
+  }
+  if (index != nullptr) std::fclose(index);
+  device->Release();
+}
+
+inline void WriteDumps() {
+  if (dump_wait < 0 || --dump_wait > 0) return;
+  dump_wait = -1;
+  for (Pending& d : dumps) {
+    void* p = nullptr;
+    D3D12_RANGE range = {0, (SIZE_T)d.size};
+    if (SUCCEEDED(d.readback->Map(0, &range, &p))) {
+      char name[96];
+      std::snprintf(name, sizeof(name), "dump\\%d-%llx.bin", d.launch, (unsigned long long)d.va);
+      if (FILE* f = Open(name, "wb")) {
+        std::fwrite(p, 1, (size_t)d.size, f);
+        std::fclose(f);
+      }
+      D3D12_RANGE none = {0, 0};
+      d.readback->Unmap(0, &none);
+    }
+    d.readback->Release();
+  }
+  ngx_probe::Logf("nv-record: %zu buffers dumped", dumps.size());
+  dumps.clear();
+}
+
 inline const char* NameOf(void* shader) {
   for (const auto& n : names)
     if (n.first == shader) return n.second.c_str();
@@ -213,6 +318,12 @@ inline bool Replay(ID3D12GraphicsCommandList* cmd, bool hold) {
   std::lock_guard<std::mutex> g(m);
   if (chain.empty() || real_launch == nullptr) return false;
   CollectProfile();
+  WriteDumps();
+  const int dump_at = dump_wait < 0 ? dump_requested : -1;
+  if (dump_at >= 0) {
+    dump_requested = -1;
+    CreateDirectoryA((dir + "dump").c_str(), nullptr);
+  }
   if (!hold) ++counter;
   // Timestamps for this replay when a profile is asked for and the last one has been read.
   bool timed = false;
@@ -249,7 +360,11 @@ inline bool Replay(ID3D12GraphicsCommandList* cmd, bool hold) {
     if (real_launch(cmd, r.shader, r.gx, r.gy, r.gz, p.data(), (uint32_t)p.size()) != 0) return false;
     cmd->ResourceBarrier(1, &all);
     if (timed) cmd->EndQuery(qheap, D3D12_QUERY_TYPE_TIMESTAMP, (UINT)i + 1);
+    if (dump_at == (int)i) CopyOut(cmd, (int)i, p);
   }
+  if (dump_at >= (int)chain.size())
+    for (size_t i = 0; i < chain.size(); ++i) CopyOut(cmd, dump_at, chain[i].params);
+  if (dump_at >= 0) dump_wait = 4;
   if (timed) {
     cmd->ResolveQueryData(qheap, D3D12_QUERY_TYPE_TIMESTAMP, 0, n, qread, 0);
     pending = 4;
@@ -299,6 +414,16 @@ inline void Install(const char* game_dir) {
   DetourAttach(reinterpret_cast<PVOID*>(&real_query), reinterpret_cast<PVOID>(&HookQuery));
   const LONG r = DetourTransactionCommit();
   ngx_probe::Logf("nv-record: nvapi_QueryInterface hooked (%ld); modules and functions to %s", r, dir.c_str());
+}
+
+inline void Register() {
+  reshade::register_event<reshade::addon_event::init_resource>(OnInitResource);
+  reshade::register_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
+}
+
+inline void Unregister() {
+  reshade::unregister_event<reshade::addon_event::init_resource>(OnInitResource);
+  reshade::unregister_event<reshade::addon_event::destroy_resource>(OnDestroyResource);
 }
 
 // On a real FreeLibrary of the add-on (ReShade cycles it while creating the device).

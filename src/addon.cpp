@@ -408,6 +408,14 @@ void PollLiveSettings() {
   }
   nv_record::replay = LiveInt(path, "ReplayNV", nv_record::replay ? 1 : 0) != 0;
   {
+    static int last_dump = -1;   // DumpNV=<launch>: a new value dumps the buffers that launch points into
+    const int v = LiveInt(path, "DumpNV", last_dump);
+    if (v != last_dump) {
+      last_dump = v;
+      if (v >= 0) nv_record::dump_requested = v;
+    }
+  }
+  {
     static int last_profile = 0;   // ProfileNV=<n>: a new value times the next n replays launch by launch
     const int v = LiveInt(path, "ProfileNV", last_profile);
     if (v != last_profile) {
@@ -775,6 +783,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
         GetModuleFileNameA(nullptr, exe, MAX_PATH);
         if (char* slash = std::strrchr(exe, '\\')) *slash = 0;
         nv_record::Install(exe);
+        nv_record::Register();
       }
       break;
     case DLL_PROCESS_DETACH:
@@ -787,6 +796,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       if (lp_reserved != nullptr) break;
       ngx_probe::Uninstall();
       nv_record::Uninstall();
+      nv_record::Unregister();
       nr_runner::Shutdown();
       ngx_probe::mark = nullptr;
       ngx_probe::after_dlss = nullptr;
