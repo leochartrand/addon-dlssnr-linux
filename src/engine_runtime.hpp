@@ -58,7 +58,7 @@ constexpr uint32_t kNvCreateCubinEx = 0x3151211b;   // NvAPI_D3D12_CreateCubinCo
 constexpr uint32_t kNvLaunchCubin = 0x5c52bb86;     // NvAPI_D3D12_LaunchCubinShader
 
 constexpr uint32_t kRingSize = 8;       // frames of descriptors in flight
-constexpr uint32_t kConstants = 12;     // EngineConstants in engine_common.hlsli
+constexpr uint32_t kConstants = 16;     // EngineConstants in engine_common.hlsli
 constexpr uint32_t kBaseConstants = 10; // BaseConstants in engine_base.hlsl
 constexpr uint32_t kUses = 4;           // descriptor sets per frame: in and out of each region
 constexpr uint32_t kSlots = 5;          // t0-t2, u1-u2
@@ -631,6 +631,32 @@ inline std::vector<std::string> Available(const char* prefix) {
   return out;
 }
 
+// The whole-frame program for a frame of w x h: of the nr-engine\full-WxH folders, the smallest field that holds the
+// frame (the network's own padding of it, as traced); "" when there is none. Cached per frame size.
+inline std::string FullFor(uint32_t w, uint32_t h) {
+  static uint32_t cached_w = 0, cached_h = 0;
+  static std::string cached;
+  if (w == cached_w && h == cached_h) return cached;
+  cached_w = w;
+  cached_h = h;
+  cached.clear();
+  uint64_t best = ~0ull;
+  for (const std::string& name : Available("full-")) {
+    unsigned fw = 0, fh = 0;
+    if (std::sscanf(name.c_str(), "full-%ux%u", &fw, &fh) != 2 || fw < w || fh < h) continue;
+    if ((uint64_t)fw * fh < best) {
+      best = (uint64_t)fw * fh;
+      cached = name;
+    }
+  }
+  return cached;
+}
+
+// Whether the loaded crop slot holds a whole-frame program for a w x h frame.
+inline bool CoversFrame(uint32_t w, uint32_t h) {
+  return w != 0 && g.names[kCrop].rfind("full-", 0) == 0 && FieldW(kCrop) >= w && FieldH(kCrop) >= h;
+}
+
 // Run these program folders (on the render thread, between frames). Loaded programs are retired -- their
 // buffers wait out the frames in flight -- and the new ones load in the background, NGX covering
 // meanwhile. Not while a load is under way (asked again next frame). The retired programs' cubin shaders
@@ -785,6 +811,13 @@ inline bool BeginFrame(ID3D12GraphicsCommandList* cmd, ID3D12Resource* atlas, bo
 inline void (*stamp)(ID3D12GraphicsCommandList*, uint32_t region, bool net) = nullptr;
 
 // NVIDIA's live controls for one region, as the library takes them (dlssnr Controls).
+// How a run reads its motion vectors: the foveated atlas's are at its own size in its pixels (the defaults); the
+// whole frame's are the game's, at render resolution in their own units.
+struct MotionMap {
+  float map_x = 1.0f, map_y = 1.0f;     // atlas pixel -> motion texel
+  float unit_x = 1.0f, unit_y = 1.0f;   // motion value -> atlas pixels
+};
+
 struct Controls {
   float intensity = 1.0f;        // blend from the frame (0) to the answer (1)
   int style = 0;                 // 0..2
@@ -799,7 +832,7 @@ struct Controls {
 // `history` scales the network's blend weight (1 = NVIDIA's, 0 = none).
 inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource* src, ID3D12Resource* motion,
                 ID3D12Resource* dst, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t frame,
-                float history, const Controls& ctl) {
+                float history, const Controls& ctl, const MotionMap& mv = {}) {
   if (!g.in_frame || region >= kRegions) return false;
   const Program& p = Prog(region);
   if (w > p.field_w || h > p.field_h || w == 0 || h == 0) return false;
@@ -810,7 +843,8 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   constexpr uint32_t kMaxCarry = 4;   // the longest gap a history is reprojected across ("run every" goes to 4)
   const bool valid = !g.reset && g.age[region] > 0 && g.age[region] <= kMaxCarry;
   const float blend = p.blend_scale * history;
-  uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0, 0, 0};
+  uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u};
+  std::memcpy(&c[12], &mv, sizeof(mv));
   std::memcpy(&c[9], &blend, 4);
   const float motion_scale = valid ? (float)g.age[region] : 1.0f;
   std::memcpy(&c[10], &motion_scale, 4);

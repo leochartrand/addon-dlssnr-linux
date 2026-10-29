@@ -821,9 +821,21 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   void* p = s.caps;
   const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
   const uint32_t n = ++s.eval_count;
-  // Our engine takes the split calls once it has loaded and the regions are at its field.
-  const bool use_engine = s.engine && foveated && split && s.feature_calls == 2 && fov::settings.engine_crop_w != 0 &&
+  // Our engine takes the split calls once it has loaded and the regions are at its field; without foveation, the
+  // whole frame once a full-WxH program for it is loaded.
+  const bool whole = !foveated && nr_engine::CoversFrame(s.frame_w, s.frame_h);
+  const bool use_engine = s.engine &&
+                          (whole || (foveated && split && s.feature_calls == 2 && fov::settings.engine_crop_w != 0)) &&
                           nr_engine::Ready(cmd) && nr_engine::BeginFrame(cmd, in_color, history_reset);
+  // The whole frame reads the game's motion vectors (render resolution, scaled by mv_scale into render pixels)
+  // where the foveated atlas has its own, already in its pixels.
+  nr_engine::MotionMap mv_map;
+  if (whole && guide_w != 0 && guide_h != 0) {
+    mv_map.map_x = (float)guide_w / (float)s.frame_w;
+    mv_map.map_y = (float)guide_h / (float)s.frame_h;
+    mv_map.unit_x = mv_scale_x * (float)s.frame_w / (float)guide_w;
+    mv_map.unit_y = mv_scale_y * (float)s.frame_h / (float)guide_h;
+  }
   // One model call on a region of the inputs (the guides' region scales with them).
   auto call = [&](void* feature, bool low, unsigned x, unsigned y, unsigned w, unsigned h) {
     const unsigned gx = x * guide_w / s.feature_w, gy = y * guide_h / s.feature_h;
@@ -869,7 +881,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
       ctl.skin = low ? s.split_global_skin : s.skin_structure;
       ctl.auto_mask = s.auto_mask != 0;
       if (nr_engine::Run(cmd, low ? nr_engine::kLow : nr_engine::kCrop, in_color, in_motion, answer, x, y, w, h,
-                         frame, s.engine_history, ctl))
+                         frame, s.engine_history, ctl, mv_map))
         return 1;
     }
     if (feature == nullptr) return 0;   // parked: the engine was to run this one
@@ -990,14 +1002,22 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
 
 // Whether our engine runs both split passes now (NGX's features then only stand by).
 inline bool EngineCovers() {
-  return s.engine && nr_engine::g.status.load() == nr_engine::kReady && fov::settings.enabled &&
-         WantedCalls() == 2 && fov::settings.engine_crop_w != 0;
+  if (!s.engine || nr_engine::g.status.load() != nr_engine::kReady) return false;
+  if (!fov::settings.enabled) return nr_engine::CoversFrame(s.frame_w, s.frame_h);
+  return WantedCalls() == 2 && fov::settings.engine_crop_w != 0;
 }
 
 // Shared by both entry points: housekeeping, then whether the pass may run this frame.
 inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
   TickGraveyard();
-  nr_engine::Select(s.engine_crop, s.engine_low);
+  // Foveated: the chosen crop and periphery. Whole frame: the full-WxH program for the frame, alone ("-": no
+  // periphery folder).
+  if (fov::settings.enabled) {
+    nr_engine::Select(s.engine_crop, s.engine_low);
+  } else if (s.engine && s.frame_w != 0) {
+    const std::string full = nr_engine::FullFor(s.frame_w, s.frame_h);
+    if (!full.empty()) nr_engine::Select(full, "-");
+  }
   UpdateFrameSize();   // the programs' fields may have changed
   if (s.retire_pending.exchange(false, std::memory_order_relaxed))
     RetireFeature("model settings changed");

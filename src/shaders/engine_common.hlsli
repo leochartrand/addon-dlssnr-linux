@@ -30,6 +30,8 @@ cbuffer EngineConstants : register(b0)
     float g_blend;     // the learned cap on the blend, times the user's history strength (0 = none)
     float g_motion;    // scale on the motion the history is reprojected along (1 = as given, 0 = none)
     float g_intensity; // NR intensity: blend from the frame (0) to the answer (1); the history keeps the answer
+    float2 g_mv_map;   // atlas pixel -> motion texel (1: the motion is at the atlas's size)
+    float2 g_mv_unit;  // motion texel's value -> atlas pixels (1: already atlas pixels)
 };
 
 // Reflect once about the last pixel, then clamp what is still outside.
@@ -42,7 +44,7 @@ uint Mirror(uint i, uint n)
 // Where the atlas pixel p was last frame, and whether the region has it.
 bool Reproject(uint2 p, out float2 prev)
 {
-    prev = (float2)p + 0.5 + Motion[p] * g_motion;
+    prev = (float2)p + 0.5 + Motion[(uint2)(((float2)p + 0.5) * g_mv_map)] * g_mv_unit * g_motion;
     float2 lo = float2(g_x, g_y) + 0.5, hi = float2(g_x + g_w, g_y + g_h) - 0.5;
     return g_valid != 0 && g_blend > 0.0 && all(prev >= lo) && all(prev <= hi);
 }

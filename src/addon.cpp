@@ -504,7 +504,28 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     nr_runner::FeatureSize(&fw, &fh);
     ImGui::TextDisabled("The model works on %ux%u of a %ux%u frame (%.0f%% of the pixels)%s", fw, fh, s.frame_w,
                         s.frame_h, 100.0 * fw * fh / ((double)s.frame_w * s.frame_h),
-                        two_calls && s.engine ? "; our engine" : "; NVIDIA's NGX");
+                        nr_runner::EngineCovers() ? "; our engine" : "; NVIDIA's runtime");
+  }
+
+  // The three ways to run the model. They set the engine and foveation switches below (Pipeline, Foveation),
+  // which stay independent for benchmarks: NVIDIA's runtime under foveation is the fourth combination.
+  {
+    int mode = !s.engine ? (f.enabled ? 3 : 0) : (f.enabled ? 2 : 1);
+    bool pick = false;
+    pick |= ImGui::RadioButton("NVIDIA's runtime (openNR FP16)", &mode, 0);
+    ImGui::SameLine();
+    pick |= ImGui::RadioButton("Our engine, whole frame", &mode, 1);
+    ImGui::SameLine();
+    pick |= ImGui::RadioButton("Our engine, foveated", &mode, 2);
+    if (mode == 3) ImGui::TextDisabled("Now: NVIDIA's runtime, foveated (set under Pipeline and Foveation)");
+    if (pick && mode != 3) {
+      s.engine = mode != 0;
+      f.enabled = mode == 2;
+      changed = true;
+    }
+    if (mode == 1 && s.frame_w != 0 && nr_engine::FullFor(s.frame_w, s.frame_h).empty())
+      ImGui::TextDisabled("No whole-frame program for %ux%u (nr-engine\\full-WxH): NVIDIA's runtime runs it.",
+                          s.frame_w, s.frame_h);
   }
 
   if (ImGui::CollapsingHeader("Picture", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -578,14 +599,15 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
     if (s.engine) {
       if (nr_engine::g.count > 0)
-        ImGui::TextDisabled("Engine: %s -- programs: crop %ux%u, periphery %ux%u (the Small network)",
-                            nr_engine::StatusText(), nr_engine::g.progs[0].field_w, nr_engine::g.progs[0].field_h,
-                            nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_w,
-                            nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
+        ImGui::TextDisabled(nr_engine::g.count > 1 ? "Engine: %s -- programs %s and %s (the Small network)"
+                                                   : "Engine: %s -- program %s (the Small network)",
+                            nr_engine::StatusText(), nr_engine::g.names[0].c_str(), nr_engine::g.names[1].c_str());
       else
         ImGui::TextDisabled("Engine: %s", nr_engine::StatusText());
-      if (!two_calls)
-        ImGui::TextDisabled("No engine program for the full frame yet: NGX runs it.");
+      if (!split && !nr_engine::CoversFrame(s.frame_w, s.frame_h))
+        ImGui::TextDisabled("No whole-frame program for this resolution: NVIDIA's runtime runs it.");
+      else if (split && f.split_calls != 2)
+        ImGui::TextDisabled("Foveation in one call: NVIDIA's runtime runs it.");
       else if (f.free_sizes)
         ImGui::TextDisabled("Free sizes are on (Foveation): NGX runs the regions.");
       changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
