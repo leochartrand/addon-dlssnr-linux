@@ -37,6 +37,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs.h>
 
+#include "nv_record.hpp"
 #include "nr_compose.hpp"
 #include "fov.hpp"
 #include "diag.hpp"
@@ -888,6 +889,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
         return 1;
     }
     if (feature == nullptr) return 0;   // parked: the engine was to run this one
+    nv_record::Scope recording;   // RecordNV: NVIDIA's launches inside this evaluate
     return s.evaluate(cmd, feature, s.caps);
   };
   LARGE_INTEGER model_t0;

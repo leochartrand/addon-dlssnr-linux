@@ -398,6 +398,14 @@ void PollLiveSettings() {
   diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
   screenshot_requested = LiveInt(path, "Screenshot", screenshot_requested);
   s.force_reset = LiveInt(path, "ForceReset", s.force_reset ? 1 : 0) != 0;
+  {
+    static int last_record = 0;   // RecordNV=<n>: a new value arms the recorder for n NR evaluates
+    const int v = LiveInt(path, "RecordNV", last_record);
+    if (v != last_record) {
+      last_record = v;
+      if (v > 0) nv_record::requested = v;
+    }
+  }
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -753,6 +761,12 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       ngx_probe::after_dlss = graded_hook::OnDlssEvaluated;
       reshade::register_overlay(nullptr, OnDrawOverlay);   // the settings, in this add-on's entry on the Add-ons tab
       ngx_probe::TryInstall();  // in case NGX is already resident
+      {
+        char exe[MAX_PATH] = {};
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        if (char* slash = std::strrchr(exe, '\\')) *slash = 0;
+        nv_record::Install(exe);
+      }
       break;
     case DLL_PROCESS_DETACH:
       // Non-null lp_reserved: the process is terminating and every other
@@ -763,6 +777,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       // where the detours must be removed before this image disappears.
       if (lp_reserved != nullptr) break;
       ngx_probe::Uninstall();
+      nv_record::Uninstall();
       nr_runner::Shutdown();
       ngx_probe::mark = nullptr;
       ngx_probe::after_dlss = nullptr;
