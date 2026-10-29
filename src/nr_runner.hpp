@@ -819,7 +819,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   const uint32_t frame = s.eval_count;   // the ring index RecordPre and Squeeze used
   const uint32_t n = ++s.eval_count;
   // Our engine takes the split calls once it has loaded and the regions are at its field.
-  const bool use_engine = foveated && split && s.feature_calls == 2 && fov::settings.engine_crop_w != 0 &&
+  const bool use_engine = s.engine && foveated && split && s.feature_calls == 2 && fov::settings.engine_crop_w != 0 &&
                           nr_engine::Ready(cmd) && nr_engine::BeginFrame(cmd, in_color, history_reset);
   // One model call on a region of the inputs (the guides' region scales with them).
   auto call = [&](void* feature, bool low, unsigned x, unsigned y, unsigned w, unsigned h) {
