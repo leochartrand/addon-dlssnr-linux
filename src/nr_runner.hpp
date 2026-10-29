@@ -241,7 +241,9 @@ inline void UpdateFrameSize() {
                       (s.render_w != s.out_w || s.render_h != s.out_h);
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
-  const bool engine = s.engine && split && fov::settings.split_calls == 2;
+  // The engine's programs fix the regions' sizes; NGX uses the same sizes whenever the programs exist, so
+  // switching between the two changes only what runs the network, never what it is given.
+  const bool engine = split && fov::settings.split_calls == 2;
   fov::settings.engine_crop_w = engine ? nr_engine::FieldW(nr_engine::kCrop) : 0;
   fov::settings.engine_crop_h = engine ? nr_engine::FieldH(nr_engine::kCrop) : 0;
   fov::settings.engine_low_w = engine ? nr_engine::FieldW(nr_engine::kLow) : 0;

@@ -418,7 +418,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   bool changed = false;
   const bool split = f.enabled && f.split;
   const bool two_calls = split && f.split_calls == 2;
-  const bool engine_sizes = two_calls && s.engine && f.engine_crop_w != 0;   // the engine fixes both regions
+  const bool engine_sizes = two_calls && f.engine_crop_w != 0;   // the engine's programs fix both regions' sizes
 
   bool enabled = nr_runner::IsEnabled();
   if (ImGui::Checkbox("Enable Neural Rendering (F10)", &enabled)) nr_runner::SetEnabled(enabled);
@@ -496,18 +496,24 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
 
   if (ImGui::CollapsingHeader("Pipeline")) {
     changed |= ImGui::Checkbox("Anti-aliasing (DLAA) on the frame before the pass", &s.dlaa);
-    if (two_calls) {
-      changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
-      if (s.engine) {
-        ImGui::TextDisabled("Engine: %s -- crop %ux%u, periphery %ux%u; NGX runs until it is ready",
+    // What runs the network: independent of foveation. The engine replays NVIDIA's Small network from
+    // programs traced at fixed sizes; where it has no program for a call, NGX runs that call.
+    changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
+    if (s.engine) {
+      if (nr_engine::g.count > 0)
+        ImGui::TextDisabled("Engine: %s -- programs: crop %ux%u, periphery %ux%u (the Small network)",
                             nr_engine::StatusText(), nr_engine::g.progs[0].field_w, nr_engine::g.progs[0].field_h,
                             nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_w,
                             nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
-        changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
-      }
-    } else {
-      ImGui::TextDisabled("Our engine runs the split foveation in two calls only.");
+      else
+        ImGui::TextDisabled("Engine: %s", nr_engine::StatusText());
+      if (!two_calls)
+        ImGui::TextDisabled("No engine program for this mode's size yet: NGX runs it.");
+      changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
     }
+    if (s.preset != 0 || (two_calls && f.periphery_pass && s.split_global_preset > 0))
+      ImGui::TextDisabled("NGX runs preset %d / %d here; the engine always runs Small (preset 0).", s.preset,
+                          s.split_global_preset < 0 ? s.preset : s.split_global_preset);
   }
 
   if (ImGui::CollapsingHeader("Foveation", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -527,7 +533,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       } else {
         ImGui::SeparatorText("The crop (full resolution, around the gaze)");
         if (engine_sizes) {
-          ImGui::TextDisabled("%ux%u: the engine program's size", f.engine_crop_w, f.engine_crop_h);
+          ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_crop_w, f.engine_crop_h);
         } else {
           changed |= SliderWithReset("Crop width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
           changed |= SliderWithReset("Crop height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
@@ -540,7 +546,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
           changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
                                      &f.periphery_pass);
         }
-        if (engine_sizes) ImGui::TextDisabled("%ux%u: the engine program's size", f.engine_low_w, f.engine_low_h);
+        if (engine_sizes) ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_low_w, f.engine_low_h);
         else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
         if (two_calls && f.periphery_pass) {
           changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
