@@ -213,6 +213,9 @@ namespace ngx_probe {
 constexpr uint32_t kFullDumps = 3;
 constexpr uint32_t kHeartbeatEvery = 600;
 
+// ui_probe's marker for the DLSS evaluate in the command stream (set by the add-on).
+inline void (*mark)(void* native_cmd, const char* what) = nullptr;
+
 // The Reserved18 handle, so evaluates of the NR feature get their own dump.
 inline NVSDK_NGX_Handle* nr_handle = nullptr;
 
@@ -272,6 +275,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   }
   // Before the upscale, the pass rewrites DLSS-SR's input and the evaluate reads our copy; after
   // it (the default), the pass rewrites DLSS-SR's output.
+  if (mark != nullptr) mark(cmd_list, "DLSS evaluate");
   ID3D12Resource* const swapped = nr_runner::BeforeDlss(cmd_list, params);
   // DLAA off: the frame is copied to the Output instead of DLSS-SR's 1:1 pass, and the pass runs on it.
   const auto eval_result = swapped == nullptr && nr_runner::CopyInsteadOfDlaa(cmd_list, params)

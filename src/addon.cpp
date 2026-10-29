@@ -21,6 +21,7 @@
 #include <reshade.hpp>
 
 #include "ngx_probe.hpp"
+#include "ui_probe.hpp"
 
 namespace {
 
@@ -75,7 +76,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 // pointers still works.
 void PollLiveSettings();  // below, with the rest of the settings code
 
-void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain*,
+void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain,
                const reshade::api::rect*, const reshade::api::rect*,
                uint32_t, const reshade::api::rect*) {
   ngx_probe::TryInstall();
@@ -95,6 +96,7 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain*,
   }
 
   PollLiveSettings();
+  ui_probe::OnPresent(swapchain, nr_runner::s.game_dir);
 }
 
 // --- settings persistence -------------------------------------------------
@@ -587,6 +589,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
     nr_runner::poll_live = PollLiveSettings;
     reshade::register_event<reshade::addon_event::present>(OnPresent);
+      ui_probe::Register();
+      ngx_probe::mark = ui_probe::Mark;
       reshade::register_overlay(nullptr, OnDrawOverlay);   // the settings, in this add-on's entry on the Add-ons tab
       ngx_probe::TryInstall();  // in case NGX is already resident
       break;
@@ -600,6 +604,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       if (lp_reserved != nullptr) break;
       ngx_probe::Uninstall();
       nr_runner::Shutdown();
+      ngx_probe::mark = nullptr;
+      ui_probe::Unregister();
       reshade::unregister_overlay(nullptr, OnDrawOverlay);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
