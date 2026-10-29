@@ -753,9 +753,12 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   diag::Poll(s.eval_count, s.game_dir, ngx_probe::Log);
   diag::Begin(cmd, s.eval_count, ngx_probe::Log);
 
-  // Copy the original aside, encode the display-referred proxy, record the measurement.
+  // Copy the original aside, encode the display-referred proxy, record the measurement. On the graded frame under
+  // foveation the copy itself is what the atlas is built from: no encode, no measurement.
+  const bool foveated = s.feature_w != s.frame_w || s.feature_h != s.frame_h;
+  ID3D12Resource* const picture = ldr && foveated ? s.color_copy : s.proxy;
   if (!nr_compose::RecordPre(cmd, color, s.color_copy, s.proxy, s.frame_w, s.frame_h, s.eval_count,
-                             wp, ldr)) {
+                             wp, ldr, picture == s.proxy)) {
     GiveUp("compose pipeline initialisation failed");
     return false;
   }
@@ -770,7 +773,6 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
 
   // Foveated: the model gets working-size copies (motion vectors already in working pixels) and
   // writes a working-size answer that Expand stretches back below. Built at the feature's size.
-  const bool foveated = s.feature_w != s.frame_w || s.feature_h != s.frame_h;
   ID3D12Resource* in_color = s.proxy;
   ID3D12Resource* in_depth = depth;
   ID3D12Resource* in_motion = motion;
@@ -780,7 +782,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   bool history_reset = false;   // the game's reset or a new layout, before any per-call resets
   if (foveated) {
     const bool squeezed = fov::SplitSqueeze(
-        cmd, s.proxy, depth, motion, s.frame_w, s.frame_h, s.render_w, s.render_h, mv_scale_x,
+        cmd, picture, depth, motion, s.frame_w, s.frame_h, s.render_w, s.render_h, mv_scale_x,
         mv_scale_y, s.eval_count);
     if (!squeezed || fov::g.x.work != s.feature_w || fov::g.y.work != s.feature_h) {
       // A failed Squeeze transitioned nothing; a size that no longer matches the feature means
@@ -945,7 +947,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   for (diag::Stamp st : {diag::kCropBase, diag::kCropNet, diag::kLowBase, diag::kLowNet})
     if ((s.stamped & (1u << st)) == 0) diag::Mark(cmd, st);
   diag::Mark(cmd, diag::kModel);
-  if (foveated) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
+  if (foveated) fov::SplitExpand(cmd, s.output, picture, motion, frame, global_fresh);
   diag::Mark(cmd, diag::kExpand);
 
   // Anchor the model's answer to the original and write the blend into the game's output, which

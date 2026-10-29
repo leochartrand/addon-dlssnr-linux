@@ -291,10 +291,12 @@ inline void Dispatch(ID3D12GraphicsCommandList* cmd, ID3D12PipelineState* pso, u
 // UNORDERED_ACCESS; the game's output is in UNORDERED_ACCESS around DLSS evaluation.
 
 // Copy the original aside, encode the proxy, and record the luminance measurement. Leaves:
-// game_out COPY_SOURCE, colorCopy and proxy NON_PIXEL_SHADER_RESOURCE (ready for the model).
+// game_out COPY_SOURCE, colorCopy and proxy NON_PIXEL_SHADER_RESOURCE (ready for the model). `encode` false skips
+// the proxy's encode and the measurement (the graded frame under foveation: the frame is already what the model
+// is shown, and its atlas is built from the copy; the proxy is left as it was, its states unchanged).
 inline bool RecordPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_out,
                       ID3D12Resource* color_copy, ID3D12Resource* proxy, uint32_t w, uint32_t h,
-                      uint32_t frame, float white_point, bool ldr) {
+                      uint32_t frame, float white_point, bool ldr, bool encode = true) {
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
   if (!Init(device) || !EnsureBuffers(device, w, h)) {
@@ -318,6 +320,12 @@ inline bool RecordPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_out,
   cmd->CopyResource(color_copy, game_out);
   Barrier(cmd, color_copy, D3D12_RESOURCE_STATE_COPY_DEST,
           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+  if (!encode) {
+    Barrier(cmd, proxy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    device->Release();
+    return true;
+  }
 
   // The proxy the model will see.
   Dispatch(cmd, c.encode_pso, base + 0, base + 2, p, (w + 7) / 8, (h + 7) / 8);
