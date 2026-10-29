@@ -248,8 +248,8 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::set_config_value(nullptr, kConfigSection, "NREngine", s.engine);
-  reshade::set_config_value(nullptr, kConfigSection, "EngineCrop", s.engine_crop);
-  reshade::set_config_value(nullptr, kConfigSection, "EngineLow", s.engine_low);
+  reshade::set_config_value(nullptr, kConfigSection, "EngineCrop", static_cast<const char*>(s.engine_crop));
+  reshade::set_config_value(nullptr, kConfigSection, "EngineLow", static_cast<const char*>(s.engine_low));
   reshade::set_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
   reshade::set_config_value(nullptr, kConfigSection, "FreeSizes", f.free_sizes);
   reshade::set_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
