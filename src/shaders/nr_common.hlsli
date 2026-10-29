@@ -33,4 +33,5 @@ cbuffer Constants : register(b0)
     uint g_debug;         // 0 off, 1 proxy, 2 model answer, 3 difference x20
     uint g_width;
     uint g_height;
+    uint g_ldr;           // 1: the frame is already display-referred (the graded frame); it goes in and out as is
 };

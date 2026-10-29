@@ -215,6 +215,8 @@ constexpr uint32_t kHeartbeatEvery = 600;
 
 // ui_probe's marker for the DLSS evaluate in the command stream (set by the add-on).
 inline void (*mark)(void* native_cmd, const char* what) = nullptr;
+// graded_hook's arming, after each successful DLSS evaluate (set by the add-on).
+inline void (*after_dlss)() = nullptr;
 
 // The Reserved18 handle, so evaluates of the NR feature get their own dump.
 inline NVSDK_NGX_Handle* nr_handle = nullptr;
@@ -283,8 +285,10 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
                                : real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
   if (swapped != nullptr)
     nr_runner::AfterDlss(cmd_list, params, swapped);
-  else if (eval_result == NVSDK_NGX_Result_Success)
+  else if (eval_result == NVSDK_NGX_Result_Success) {
     nr_runner::OnDlssEvaluated(cmd_list, params);
+    if (after_dlss != nullptr) after_dlss();
+  }
   return eval_result;
 }
 

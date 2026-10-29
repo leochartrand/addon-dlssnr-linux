@@ -22,6 +22,7 @@
 
 #include "ngx_probe.hpp"
 #include "ui_probe.hpp"
+#include "graded_hook.hpp"
 
 namespace {
 
@@ -97,6 +98,7 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
 
   PollLiveSettings();
   ui_probe::OnPresent(swapchain, nr_runner::s.game_dir);
+  graded_hook::OnPresent();
 }
 
 // --- settings persistence -------------------------------------------------
@@ -136,6 +138,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "SplitGlobalSkinStructure", s.split_global_skin);
   reshade::get_config_value(nullptr, kConfigSection, "DLAA", s.dlaa);
   reshade::get_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
+  reshade::get_config_value(nullptr, kConfigSection, "PassOnGradedFrame", s.graded);
 
   auto& f = fov::settings;
   reshade::get_config_value(nullptr, kConfigSection, "Foveation", f.enabled);
@@ -220,6 +223,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "SplitGlobalSkinStructure", s.split_global_skin);
   reshade::set_config_value(nullptr, kConfigSection, "DLAA", s.dlaa);
   reshade::set_config_value(nullptr, kConfigSection, "BeforeUpscale", s.before_upscale);
+  reshade::set_config_value(nullptr, kConfigSection, "PassOnGradedFrame", s.graded);
 
   const auto& f = fov::settings;
   reshade::set_config_value(nullptr, kConfigSection, "Foveation", f.enabled);
@@ -316,6 +320,7 @@ void PollLiveSettings() {
   s.split_global_skin = LiveFloat(path, "SplitGlobalSkinStructure", s.split_global_skin);
   s.dlaa = LiveInt(path, "DLAA", s.dlaa ? 1 : 0) != 0;
   s.before_upscale = LiveInt(path, "BeforeUpscale", s.before_upscale ? 1 : 0) != 0;
+  s.graded = LiveInt(path, "PassOnGradedFrame", s.graded ? 1 : 0) != 0;
   f.enabled = LiveInt(path, "Foveation", f.enabled ? 1 : 0) != 0;
   f.width = LiveFloat(path, "FoveaWidth", f.width);
   f.height = LiveFloat(path, "FoveaHeight", f.height);
@@ -426,12 +431,25 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   }
 
   if (ImGui::CollapsingHeader("Picture", ImGuiTreeNodeFlags_DefaultOpen)) {
-    changed |= SliderWithReset("Detail strength", &s.transfer, 0.0f, 1.5f, "%.2f", 1.0f);
-    changed |= SliderWithReset("Colour strength", &s.colour_strength, 0.0f, 1.0f, "%.2f", 0.0f);
-    changed |= SliderWithReset("Highlight guard", &s.max_ratio, 1.0f, 8.0f, "%.1fx", 2.0f);
-    changed |= SliderWithReset("White point scale", &s.wp_scale, 0.1f, 4.0f, "%.2f", 1.0f);
-    if (s.wp_ema > 0.0f) ImGui::TextDisabled("Measured white point: %.4f", s.wp_ema);
-    else ImGui::TextDisabled("Measured white point: (measuring...)");
+    // Where the pass runs decides what the frame is: the graded picture needs no colour bridge.
+    int where = s.graded ? 0 : (s.before_upscale ? 2 : 1);
+    ImGui::TextUnformatted("The model works on");
+    if (ImGui::RadioButton("The game's graded frame, before its UI (where NVIDIA runs it)", &where, 0)) changed = true;
+    if (ImGui::RadioButton("DLSS's output (HDR, before the game's grade; colour bridge)", &where, 1)) changed = true;
+    if (ImGui::RadioButton("DLSS's input (HDR, render resolution; colour bridge)", &where, 2)) changed = true;
+    s.graded = where == 0;
+    s.before_upscale = where == 2;
+    changed |= SliderWithReset("Model's share of the picture", &s.transfer, 0.0f, 1.5f, "%.2f", 1.0f);
+    if (!s.graded) {
+      ImGui::SeparatorText("Colour bridge (HDR frames only)");
+      changed |= SliderWithReset("Colour strength", &s.colour_strength, 0.0f, 1.0f, "%.2f", 0.0f);
+      changed |= SliderWithReset("Highlight guard", &s.max_ratio, 1.0f, 8.0f, "%.1fx", 2.0f);
+      changed |= SliderWithReset("White point scale", &s.wp_scale, 0.1f, 4.0f, "%.2f", 1.0f);
+      if (s.wp_ema > 0.0f) ImGui::TextDisabled("Measured white point: %.4f", s.wp_ema);
+      else ImGui::TextDisabled("Measured white point: (measuring...)");
+    } else {
+      ImGui::TextDisabled("Graded frames: %u this period, not found %u", graded_hook::ran, graded_hook::missed);
+    }
   }
 
   if (ImGui::CollapsingHeader("Model (NVIDIA's controls)", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -478,8 +496,6 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
 
   if (ImGui::CollapsingHeader("Pipeline")) {
     changed |= ImGui::Checkbox("Anti-aliasing (DLAA) on the frame before the pass", &s.dlaa);
-    // Only differs from the default when the game's DLSS really upscales (input smaller than output).
-    changed |= ImGui::Checkbox("Run before the upscale (the model works at render resolution)", &s.before_upscale);
     if (two_calls) {
       changed |= ImGui::Checkbox("Our engine (precompiled Ampere cubins) instead of NGX", &s.engine);
       if (s.engine) {
@@ -590,7 +606,9 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
     nr_runner::poll_live = PollLiveSettings;
     reshade::register_event<reshade::addon_event::present>(OnPresent);
       ui_probe::Register();
+      graded_hook::Register();
       ngx_probe::mark = ui_probe::Mark;
+      ngx_probe::after_dlss = graded_hook::OnDlssEvaluated;
       reshade::register_overlay(nullptr, OnDrawOverlay);   // the settings, in this add-on's entry on the Add-ons tab
       ngx_probe::TryInstall();  // in case NGX is already resident
       break;
@@ -605,6 +623,8 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       ngx_probe::Uninstall();
       nr_runner::Shutdown();
       ngx_probe::mark = nullptr;
+      ngx_probe::after_dlss = nullptr;
+      graded_hook::Unregister();
       ui_probe::Unregister();
       reshade::unregister_overlay(nullptr, OnDrawOverlay);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);

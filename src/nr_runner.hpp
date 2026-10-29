@@ -199,6 +199,13 @@ struct State {
   // render-resolution input, so the model sees one uniform scale and DLSS-SR upscales its answer.
   // frame_w/h is the size of the picture the pass works on; textures are built at it.
   bool before_upscale = false;
+  // graded (the default): the pass runs on the game's graded frame just before its UI, where NVIDIA
+  // places it -- display-referred, after the game's own tonemapping and grading, the UI never processed.
+  // The DLSS evaluate then only lends its guides and runs as the game asked (graded_hook.hpp finds the
+  // frame). Off: the pass runs inside the DLSS evaluate, on its HDR output (or input, before_upscale),
+  // through the colour bridge.
+  bool graded = true;
+  ID3D12Resource* graded_frame = nullptr;   // our UAV copy of the graded frame, processed and copied back
   unsigned frame_w = 0, frame_h = 0;
   unsigned tex_w = 0, tex_h = 0;
   int create_flags = 0;
@@ -230,7 +237,7 @@ inline void (*poll_live)() = nullptr;
 // Split foveation always works on the output: its crop is there for the display's full resolution.
 inline void UpdateFrameSize() {
   const bool split = fov::settings.enabled && fov::settings.split;
-  const bool before = s.before_upscale && !split && s.render_w != 0 && s.render_h != 0 &&
+  const bool before = s.before_upscale && !s.graded && !split && s.render_w != 0 && s.render_h != 0 &&
                       (s.render_w != s.out_w || s.render_h != s.out_h);
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
@@ -458,6 +465,8 @@ inline void Shutdown() {
   s.proxy = nullptr;
   if (s.pre_frame != nullptr) s.pre_frame->Release();
   s.pre_frame = nullptr;
+  if (s.graded_frame != nullptr) s.graded_frame->Release();
+  s.graded_frame = nullptr;
   for (auto& g : s.graveyard) {
     if (g.resource != nullptr) g.resource->Release();
     if (g.feature != nullptr && s.release != nullptr) s.release(g.feature);
@@ -685,22 +694,45 @@ inline void AbortAfterPre(ID3D12GraphicsCommandList* cmd, ID3D12Resource* game_o
                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
+// What the pass takes from the game's DLSS evaluate: its guides.
+struct Guides {
+  ID3D12Resource* depth = nullptr;
+  ID3D12Resource* motion = nullptr;
+  float mv_scale_x = 1.0f, mv_scale_y = 1.0f;
+  int reset = 0;
+};
+
+inline Guides GuidesOf(const NVSDK_NGX_Parameter* game_params) {
+  Guides g;
+  game_params->Get(NVSDK_NGX_Parameter_Depth, &g.depth);
+  game_params->Get(NVSDK_NGX_Parameter_MotionVectors, &g.motion);
+  game_params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &g.mv_scale_x);
+  game_params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &g.mv_scale_y);
+  game_params->Get(NVSDK_NGX_Parameter_Reset, &g.reset);
+  return g;
+}
+
 // `color` is the picture the pass rewrites in place (UNORDERED_ACCESS on entry and exit, frame_w x
-// frame_h): the game's DLSS output, or our copy of its input. True when the model's answer landed.
-inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params,
-                     ID3D12Resource* color) {
+// frame_h): the game's DLSS output, our copy of its input, or our copy of the graded frame (`ldr`: already
+// display-referred, so it bypasses the colour bridge). True when the model's answer landed.
+inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D12Resource* color, bool ldr) {
   // CPU time spent recording the pass (on the frame's critical path), and the model calls' share.
   LARGE_INTEGER cpu_t0, cpu_freq;
   QueryPerformanceCounter(&cpu_t0);
   QueryPerformanceFrequency(&cpu_freq);
   LONGLONG model_ticks = 0;
   // The model sees the frame's encoded proxy, and the game's DLSS guides are the model's guides.
-  ID3D12Resource* depth = nullptr;
-  ID3D12Resource* motion = nullptr;
-  game_params->Get(NVSDK_NGX_Parameter_Depth, &depth);
-  game_params->Get(NVSDK_NGX_Parameter_MotionVectors, &motion);
+  ID3D12Resource* const depth = guides.depth;
+  ID3D12Resource* const motion = guides.motion;
   if (color == nullptr || depth == nullptr || motion == nullptr) return false;
 
+  // The textures follow the picture's format (the HDR output or the 8-bit graded frame).
+  if (s.output != nullptr && s.output_format != color->GetDesc().Format) {
+    Bury(s.output, nullptr);
+    Bury(s.color_copy, nullptr);
+    Bury(s.proxy, nullptr);
+    s.output = s.color_copy = s.proxy = nullptr;
+  }
   if (!CreateTextures(cmd, color)) return false;
 
   // Fold the latest luminance reading into the smoothed white point. The reading lags a few
@@ -718,18 +750,15 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
 
   // Copy the original aside, encode the display-referred proxy, record the measurement.
   if (!nr_compose::RecordPre(cmd, color, s.color_copy, s.proxy, s.frame_w, s.frame_h, s.eval_count,
-                             wp)) {
+                             wp, ldr)) {
     GiveUp("compose pipeline initialisation failed");
     return false;
   }
 
   diag::Mark(cmd, diag::kEncode);
 
-  float mv_scale_x = 1.0f, mv_scale_y = 1.0f;
-  game_params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mv_scale_x);
-  game_params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mv_scale_y);
-  int reset = 0;
-  game_params->Get(NVSDK_NGX_Parameter_Reset, &reset);
+  float mv_scale_x = guides.mv_scale_x, mv_scale_y = guides.mv_scale_y;
+  int reset = guides.reset;
   const bool game_reset = reset != 0;
   const bool depth_inverted =
       (s.create_flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
@@ -910,7 +939,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* 
   const bool pass_debug = foveated && split && s.feature_calls == 2 && fov::PassDebug() != 0;
   nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.frame_w, s.frame_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
-                         pass_debug ? 2u : (uint32_t)s.debug_view);
+                         pass_debug ? 2u : (uint32_t)s.debug_view, ldr);
   if (foveated && !pass_debug && s.debug_view == 4) fov::DebugMap(cmd, color, frame, split);
   diag::Mark(cmd, diag::kResolve);
   diag::End(cmd);
@@ -1003,7 +1032,7 @@ inline ID3D12Resource* BeforeDlss(ID3D12GraphicsCommandList* cmd,
   if (s.gave_up || cmd == nullptr || game_params == nullptr) return nullptr;
   if (s.out_w == 0 || s.out_h == 0) return nullptr;  // no DLSS-SR create seen yet
   UpdateFrameSize();
-  if (s.frame_w == s.out_w && s.frame_h == s.out_h) return nullptr;  // the pass runs after
+  if (s.graded || (s.frame_w == s.out_w && s.frame_h == s.out_h)) return nullptr;  // the pass runs later
   if (!Prepare(cmd)) return nullptr;
 
   ID3D12Resource* input = nullptr;
@@ -1047,7 +1076,7 @@ inline ID3D12Resource* BeforeDlss(ID3D12GraphicsCommandList* cmd,
   Transition(cmd, input, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-  if (!Evaluate(cmd, game_params, s.pre_frame)) return nullptr;  // pre_frame is UAV again
+  if (!Evaluate(cmd, GuidesOf(game_params), s.pre_frame, false)) return nullptr;  // pre_frame is UAV again
 
   Transition(cmd, s.pre_frame, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   const_cast<NVSDK_NGX_Parameter*>(game_params)->Set(NVSDK_NGX_Parameter_Color, s.pre_frame);
@@ -1081,9 +1110,19 @@ inline bool CopyInsteadOfDlaa(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Pa
   return true;
 }
 
+// The guides of this frame's DLSS evaluate, for the pass on the graded frame later in the frame (graded
+// mode); valid until RunOnGraded takes them or the next present drops them.
+inline Guides graded_guides;
+inline bool graded_guides_valid = false;
+
 // Called after every successful game DLSS-SR evaluate, on the game's own command list.
 inline void OnDlssEvaluated(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params) {
   if (s.gave_up || cmd == nullptr || game_params == nullptr) return;
+  if (s.graded) {
+    graded_guides = GuidesOf(game_params);
+    graded_guides_valid = graded_guides.depth != nullptr && graded_guides.motion != nullptr;
+    return;
+  }
   if (s.out_w == 0 || s.out_h == 0) return;  // no DLSS-SR create seen yet
   UpdateFrameSize();
   if (s.frame_w != s.out_w || s.frame_h != s.out_h) return;  // the pass ran before the upscale
@@ -1091,9 +1130,89 @@ inline void OnDlssEvaluated(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Para
 
   ID3D12Resource* color = nullptr;
   game_params->Get(NVSDK_NGX_Parameter_Output, &color);
-  Evaluate(cmd, game_params, color);
+  Evaluate(cmd, GuidesOf(game_params), color, false);
 
   NR_TEST_HOOK_AFTER_EVALUATE();
+}
+
+// Graded mode: the pass on the game's graded frame `scene` (output size, display-referred), recorded on the
+// game's command list just before it draws its UI. `scene_state` is the frame's state there (it is left in
+// it); depth_state/motion_state are the guides' states (they must be readable by compute). The frame is
+// copied into graded_frame (it need not allow UAV), processed there, and copied back. The caller restores
+// the game's pipeline state afterwards. True when the model's answer landed.
+inline bool RunOnGraded(ID3D12GraphicsCommandList* cmd, ID3D12Resource* scene, D3D12_RESOURCE_STATES scene_state) {
+  if (s.gave_up || cmd == nullptr || scene == nullptr || !s.graded || !graded_guides_valid) return false;
+  if (s.out_w == 0 || s.out_h == 0) return false;
+  const Guides guides = graded_guides;
+  graded_guides_valid = false;
+  UpdateFrameSize();
+  const D3D12_RESOURCE_DESC sd = scene->GetDesc();
+  if (sd.Width != s.frame_w || sd.Height != s.frame_h) return false;
+  if (!Prepare(cmd)) return false;
+
+  // The copy is typed (a typeless frame is read as UNORM, as the game reads its own colour).
+  DXGI_FORMAT format = sd.Format;
+  switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS: format = DXGI_FORMAT_R10G10B10A2_UNORM; break;
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    default: break;
+  }
+  if (s.graded_frame != nullptr) {
+    const D3D12_RESOURCE_DESC gd = s.graded_frame->GetDesc();
+    if (gd.Format != format || gd.Width != sd.Width || gd.Height != sd.Height) {
+      Bury(s.graded_frame, nullptr);
+      s.graded_frame = nullptr;
+    }
+  }
+  if (s.graded_frame == nullptr) {
+    ID3D12Device* device = nullptr;
+    if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
+    D3D12_HEAP_PROPERTIES heap = {};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC desc = {};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = sd.Width;
+    desc.Height = sd.Height;
+    desc.DepthOrArraySize = 1;
+    desc.MipLevels = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const HRESULT hr = device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                       IID_PPV_ARGS(&s.graded_frame));
+    device->Release();
+    if (FAILED(hr)) {
+      s.graded_frame = nullptr;
+      ngx_probe::Logf("nr-fwd: graded frame copy creation failed 0x%08x", (unsigned)hr);
+      return false;
+    }
+    ngx_probe::Logf("nr-fwd: the pass runs on the graded frame (%llux%u, format %u)",
+                    (unsigned long long)sd.Width, sd.Height, (unsigned)sd.Format);
+  }
+
+  if (scene_state != D3D12_RESOURCE_STATE_COPY_SOURCE)
+    Transition(cmd, scene, scene_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+  cmd->CopyResource(s.graded_frame, scene);
+  Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+  const bool landed = Evaluate(cmd, guides, s.graded_frame, true);   // graded_frame is UAV again
+
+  if (landed) {
+    Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(cmd, scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->CopyResource(scene, s.graded_frame);
+    Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(cmd, scene, D3D12_RESOURCE_STATE_COPY_DEST, scene_state);
+  } else if (scene_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+    Transition(cmd, scene, D3D12_RESOURCE_STATE_COPY_SOURCE, scene_state);
+  }
+  NR_TEST_HOOK_AFTER_EVALUATE();
+  return landed;
 }
 
 }  // namespace nr_runner

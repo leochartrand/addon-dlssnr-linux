@@ -10,5 +10,5 @@ void main(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= g_width || id.y >= g_height)
         return;
-    Dst[id.xy] = EncodeDisplay(Src[id.xy], g_white_point);
+    Dst[id.xy] = g_ldr != 0 ? saturate(Src[id.xy]) : EncodeDisplay(Src[id.xy], g_white_point);
 }

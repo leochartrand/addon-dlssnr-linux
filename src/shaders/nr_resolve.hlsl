@@ -20,6 +20,20 @@ void main(uint3 id : SV_DispatchThreadID)
     if (id.x >= g_width || id.y >= g_height)
         return;
 
+    // The graded frame is already what the model expects: it is shown the frame and its answer is the
+    // picture, as NVIDIA's integration has it (debug views as below; transfer 0 is still a bypass).
+    if (g_ldr != 0)
+    {
+        const float3 shown = saturate(Orig[id.xy]);
+        const float3 raw = Model[id.xy];
+        const float3 answer = select(raw == raw, saturate(raw), shown);   // NaN guard
+        if (g_debug == 1) Out[id.xy] = shown;
+        else if (g_debug == 2) Out[id.xy] = answer;
+        else if (g_debug == 3) Out[id.xy] = saturate(abs(answer - shown) * 20.0);
+        else Out[id.xy] = lerp(shown, answer, g_transfer);
+        return;
+    }
+
     const float3 o = max(Orig[id.xy], 0.0);
     float3 m = DecodeDisplay(Model[id.xy], g_white_point);
 
