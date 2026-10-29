@@ -153,6 +153,12 @@ struct State {
   uint32_t flip = 0;
   bool ran_last[kRegions] = {};
   bool ran_now[kRegions] = {};
+  // A region's history across frames it skips (the periphery run every Nth frame): frames since its answer was
+  // written (0 = no history), and its rectangle, carried forward into the buffer the next frame reads. Its next
+  // run reprojects the history along `age` frames of motion (the current frame's, assumed constant), so NVIDIA's
+  // temporal loop keeps running instead of restarting every run.
+  uint32_t age[kRegions] = {};
+  uint32_t rect[kRegions][4] = {};
   bool reset = false;
   bool in_frame = false;
   struct Grave { ID3D12Resource* r; int frames; };
@@ -654,6 +660,7 @@ inline void Select(const std::string& crop, const std::string& low) {
   g.parsed = g.parse_failed = false;
   g.error[0] = 0;
   g.ran_last[kCrop] = g.ran_last[kLow] = false;
+  g.age[kCrop] = g.age[kLow] = 0;
   g.status = kIdle;
   ngx_probe::Logf("nr-engine: programs %s and %s selected", g.names[kCrop].c_str(), g.names[kLow].c_str());
 }
@@ -710,6 +717,7 @@ inline bool EnsureHistory(ID3D12Device* device, uint32_t w, uint32_t h) {
   g.atlas_w = w;
   g.atlas_h = h;
   g.ran_last[kCrop] = g.ran_last[kLow] = false;
+  g.age[kCrop] = g.age[kLow] = 0;
   return true;
 }
 
@@ -799,11 +807,12 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
 
   history = history < 0.0f ? 0.0f : (history > 1.0f ? 1.0f : history);
-  const bool valid = !g.reset && g.ran_last[region];
+  constexpr uint32_t kMaxCarry = 4;   // the longest gap a history is reprojected across ("run every" goes to 4)
+  const bool valid = !g.reset && g.age[region] > 0 && g.age[region] <= kMaxCarry;
   const float blend = p.blend_scale * history;
   uint32_t c[kConstants] = {x, y, w, h, p.field_w, p.field_h, g.atlas_w, g.atlas_h, valid ? 1u : 0u, 0, 0, 0};
   std::memcpy(&c[9], &blend, 4);
-  const float motion_scale = 1.0f;
+  const float motion_scale = valid ? (float)g.age[region] : 1.0f;
   std::memcpy(&c[10], &motion_scale, 4);
   const float intensity = ctl.intensity < 0.0f ? 0.0f : (ctl.intensity > 1.0f ? 1.0f : ctl.intensity);
   std::memcpy(&c[11], &intensity, 4);
@@ -874,14 +883,42 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   if (stamp != nullptr) stamp(cmd, region, true);
   device->Release();
   g.ran_now[region] = true;
+  g.rect[region][0] = x;
+  g.rect[region][1] = y;
+  g.rect[region][2] = w;
+  g.rect[region][3] = h;
   return true;
 }
 
 // After a frame's runs: this frame's answers become the history.
 inline void EndFrame(ID3D12GraphicsCommandList* cmd) {
   if (!g.in_frame) return;
-  Barrier(cmd, g.hist[g.flip], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  // A region with a history that did not run this frame: its rectangle goes along into the buffer the next frame
+  // reads (this frame's prev into next), so the history survives the frames the region skips.
+  bool carry[kRegions] = {};
+  bool any = false;
+  for (uint32_t r = 0; r < kRegions; ++r) {
+    carry[r] = !g.ran_now[r] && g.age[r] > 0 && !g.reset;
+    any |= carry[r];
+  }
+  if (any) {
+    Barrier(cmd, g.hist[g.flip], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Barrier(cmd, g.hist[g.flip ^ 1], D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (uint32_t r = 0; r < kRegions; ++r) {
+      if (!carry[r]) continue;
+      D3D12_TEXTURE_COPY_LOCATION src = {g.hist[g.flip], D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+      D3D12_TEXTURE_COPY_LOCATION dst = {g.hist[g.flip ^ 1], D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX};
+      const D3D12_BOX box = {g.rect[r][0], g.rect[r][1], 0, g.rect[r][0] + g.rect[r][2], g.rect[r][1] + g.rect[r][3], 1};
+      cmd->CopyTextureRegion(&dst, g.rect[r][0], g.rect[r][1], 0, &src, &box);
+    }
+    Barrier(cmd, g.hist[g.flip ^ 1], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Barrier(cmd, g.hist[g.flip], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  } else {
+    Barrier(cmd, g.hist[g.flip], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
+  for (uint32_t r = 0; r < kRegions; ++r)
+    g.age[r] = g.ran_now[r] ? 1u : (carry[r] ? g.age[r] + 1u : 0u);
   g.flip ^= 1;
   g.ran_last[kCrop] = g.ran_now[kCrop];
   g.ran_last[kLow] = g.ran_now[kLow];
