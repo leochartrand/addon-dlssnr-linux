@@ -106,7 +106,7 @@ struct Program {
 
 struct State {
   std::atomic<int> status{kIdle};
-  std::string names[kRegions] = {"crop-1024x576", "low-576x320"};   // the folders (Select)
+  std::string names[kRegions] = {"crop-1024x576", "low-896x512"};   // the folders (Select)
   bool parsed = false;
   bool parse_failed = false;
   Program progs[kRegions];

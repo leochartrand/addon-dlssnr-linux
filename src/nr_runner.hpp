@@ -187,7 +187,7 @@ struct State {
   float engine_history = 1.0f;
   // ...and the program folders it runs (nr-engine\<name>), which fix the regions' sizes.
   char engine_crop[64] = "crop-1024x576";
-  char engine_low[64] = "low-576x320";
+  char engine_low[64] = "low-896x512";
   uint32_t stamped = 0;         // diag stamps the engine marked this frame (bit per diag::Stamp)
   // NGX's NR features are released while our engine runs both split passes (they only stand by for it, and
   // two of them on top of a 4K game overflowed a 10 GB card); the setup (sizes, textures) stays. They are

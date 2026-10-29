@@ -403,6 +403,39 @@ void PollLiveSettings() {
   ngx_probe::Log("nr-fwd: live settings applied from dlssnr-linux-live.ini");
 }
 
+// A size picker over the engine's program folders (nr-engine\<prefix>WxH): each size with its share of
+// the frame. The programs fix the region's size for both backends (unless free sizes). True on a change.
+bool ProgramSize(const char* label, const char* prefix, char* value, size_t size) {
+  static std::vector<std::string> crops, lows;
+  std::vector<std::string>& list = prefix[0] == 'c' ? crops : lows;
+  if (list.empty()) list = nr_engine::Available(prefix);
+  const unsigned fw = nr_runner::s.out_w, fh = nr_runner::s.out_h;
+  auto describe = [&](const std::string& name) {
+    unsigned w = 0, h = 0;
+    char text[160];
+    if (std::sscanf(name.c_str() + std::strlen(prefix), "%ux%u", &w, &h) == 2 && fw != 0 && fh != 0)
+      std::snprintf(text, sizeof(text), "%ux%u  (%.0f%% x %.0f%% of %ux%u, %.1f%% of the pixels)", w, h,
+                    100.0 * w / fw, 100.0 * h / fh, fw, fh, 100.0 * w * h / ((double)fw * fh));
+    else
+      std::snprintf(text, sizeof(text), "%s", name.c_str());
+    return std::string(text);
+  };
+  bool changed = false;
+  if (ImGui::BeginCombo(label, describe(value).c_str())) {
+    for (const std::string& n : list)
+      if (ImGui::Selectable(describe(n).c_str(), n == value)) {
+        strncpy_s(value, size, n.c_str(), _TRUNCATE);
+        changed = true;
+      }
+    ImGui::EndCombo();
+  }
+  ImGui::SameLine();
+  ImGui::PushID(label);
+  if (ImGui::SmallButton("rescan")) list = nr_engine::Available(prefix);
+  ImGui::PopID();
+  return changed;
+}
+
 // A slider with a reset-to-default button on its right.
 bool SliderWithReset(const char* label, float* value, float min, float max, const char* fmt,
                      float default_value) {
@@ -518,24 +551,6 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
                             nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
       else
         ImGui::TextDisabled("Engine: %s", nr_engine::StatusText());
-      // The program folders: they fix the crop's and the periphery's sizes (for NGX too, unless free sizes).
-      static std::vector<std::string> crops, lows;
-      if (crops.empty() || ImGui::SmallButton("Rescan programs")) {
-        crops = nr_engine::Available("crop-");
-        lows = nr_engine::Available("low-");
-      }
-      auto pick = [&](const char* label, char* value, size_t size, const std::vector<std::string>& list) {
-        if (ImGui::BeginCombo(label, value)) {
-          for (const std::string& n : list)
-            if (ImGui::Selectable(n.c_str(), n == value)) {
-              strncpy_s(value, size, n.c_str(), _TRUNCATE);
-              changed = true;
-            }
-          ImGui::EndCombo();
-        }
-      };
-      pick("Crop program", s.engine_crop, sizeof(s.engine_crop), crops);
-      pick("Periphery program", s.engine_low, sizeof(s.engine_low), lows);
       if (!two_calls)
         ImGui::TextDisabled("No engine program for the full frame yet: NGX runs it.");
       else if (f.free_sizes)
@@ -552,9 +567,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     if (f.enabled) {
       ImGui::SeparatorText("The crop (full resolution, around the gaze)");
       if (two_calls && nr_engine::g.count > 0)
-        changed |= ImGui::Checkbox("Free sizes (NGX only: ignore the engine programs' sizes)", &f.free_sizes);
+        changed |= ImGui::Checkbox("Free sizes (NGX only: any size, not just the engine programs')", &f.free_sizes);
       if (engine_sizes) {
-        ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_crop_w, f.engine_crop_h);
+        changed |= ProgramSize("Crop size", "crop-", s.engine_crop, sizeof(s.engine_crop));
       } else {
         changed |= SliderWithReset("Crop width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
         changed |= SliderWithReset("Crop height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
@@ -567,7 +582,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
         changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
                                    &f.periphery_pass);
       }
-      if (engine_sizes) ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_low_w, f.engine_low_h);
+      if (engine_sizes) changed |= ProgramSize("Periphery size", "low-", s.engine_low, sizeof(s.engine_low));
       else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
       if (two_calls && f.periphery_pass) {
         changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
