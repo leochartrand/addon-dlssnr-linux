@@ -85,12 +85,8 @@ int screenshot_requested = 0;
 void OnReshadePresent(reshade::api::effect_runtime* runtime) {
   static int done = 0;
   const int id = screenshot_requested;
-  if (id <= 0 || id == done) return;
+  if (id <= 0 || id == done || nr_runner::s.game_dir[0] == 0) return;
   done = id;
-  // Beside the exe (the runner learns its folder only once DLSS runs; menus come before that).
-  wchar_t dir[MAX_PATH] = {};
-  GetModuleFileNameW(nullptr, dir, MAX_PATH);
-  if (wchar_t* slash = wcsrchr(dir, L'\\')) *slash = 0;
   uint32_t w = 0, h = 0;
   runtime->get_screenshot_width_and_height(&w, &h);
   const auto format = runtime->get_device()->get_resource_desc(runtime->get_current_back_buffer()).texture.format;
@@ -99,12 +95,12 @@ void OnReshadePresent(reshade::api::effect_runtime* runtime) {
   std::vector<uint8_t> pixels(size_t(pitch) * h);
   if (!runtime->capture_screenshot(pixels.data())) return;
   wchar_t path[MAX_PATH];
-  swprintf_s(path, L"%s\\dlssnr-shot-%d.raw", dir, id);
+  swprintf_s(path, L"%s\\dlssnr-shot-%d.raw", nr_runner::s.game_dir, id);
   if (FILE* f = _wfopen(path, L"wb")) {
     fwrite(pixels.data(), 1, pixels.size(), f);
     fclose(f);
   }
-  swprintf_s(path, L"%s\\dlssnr-shot-%d.txt", dir, id);
+  swprintf_s(path, L"%s\\dlssnr-shot-%d.txt", nr_runner::s.game_dir, id);
   if (FILE* f = _wfopen(path, L"wb")) {
     std::fprintf(f, "width=%u\nheight=%u\nformat=%u\nrow_pitch=%u\n", w, h, (unsigned)format, pitch);
     fclose(f);
