@@ -71,6 +71,8 @@ struct Kernel {
   std::string name, file;
   uint32_t block[3] = {};
   uint32_t shared = 0;
+  bool chained = false;   // one of openNR's _wait / _chained kernels: it waits on its predecessor's tile flags, so
+                          // no barrier goes before it (as NVIDIA's runtime records them)
   void* shader = nullptr;
 };
 struct Param {
@@ -193,6 +195,8 @@ inline bool ParseOne(Program& p, const std::string& dir, bool* missing) {
     if (tag == "K") {
       Kernel k;
       s >> k.name >> k.file >> k.block[0] >> k.block[1] >> k.block[2] >> k.shared;
+      std::string flag;
+      k.chained = (s >> flag) && flag == "chained";
       p.kernels.push_back(k);
     } else if (tag == "S") {
       uint64_t n = 0;
@@ -900,7 +904,8 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
        p.Va(p.in_seg, p.in_off), hist_in, c);
   cmd->Dispatch((p.field_w + 7) / 8, (p.field_h + 7) / 8, 1);
   cmd->ResourceBarrier(1, &all);
-  for (const Launch& L : p.launches) {
+  for (size_t i = 0; i < p.launches.size(); ++i) {
+    const Launch& L = p.launches[i];
     if (g.launch(cmd, p.kernels[L.kernel].shader, L.grid[0], L.grid[1], L.grid[2], L.packed.data(),
                  (uint32_t)L.packed.size()) != 0) {
       // Recorded launches cannot be taken back; what is left of the frame is garbage, so stop
@@ -908,7 +913,10 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
       Fail(("LaunchCubinShader " + p.kernels[L.kernel].name).c_str());
       break;
     }
-    cmd->ResourceBarrier(1, &all);
+    // A barrier after every launch, except before one of openNR's _wait / _chained kernels: it overlaps its
+    // predecessor, waiting on its tile flags in memory -- where NVIDIA's runtime puts its barriers, exactly.
+    const bool next_chained = i + 1 < p.launches.size() && p.kernels[p.launches[i + 1].kernel].chained;
+    if (!next_chained) cmd->ResourceBarrier(1, &all);
   }
   Bind(cmd, device, g.out_pso, frame, region * 2 + 1, {src, motion, prev}, {dst, next},
        p.Va(p.out_seg, p.out_off), hist_in, c);
