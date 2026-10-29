@@ -190,10 +190,12 @@ inline Gva real_gva = nullptr;
 
 inline std::atomic<uint32_t> gva_calls{0}, uav_calls{0}, capture_calls{0};
 
+inline thread_local bool in_record_call = false;   // our own D3D12 calls: vkd3d asks addresses inside them
+
 inline D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE HookGva(ID3D12Resource* self) {
   const D3D12_GPU_VIRTUAL_ADDRESS va = real_gva(self);
   ++gva_calls;
-  if (va != 0) {
+  if (va != 0 && !in_record_call) {
     const D3D12_RESOURCE_DESC d = self->GetDesc();
     if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
       std::lock_guard<std::mutex> g(buffers_m);
@@ -314,34 +316,45 @@ inline std::vector<Pending> dumps;
 inline int dump_wait = -1;
 
 inline void CopyOut(ID3D12GraphicsCommandList* cmd, int k, const std::vector<uint8_t>& params) {
+  // The buffers first, under the lock; the D3D12 calls after it (vkd3d asks resources for their addresses inside
+  // them, which comes back through HookGva).
+  std::vector<std::pair<size_t, Buffer>> found;
+  {
+    std::lock_guard<std::mutex> g(buffers_m);
+    for (size_t off = 0; off + 8 <= params.size(); off += 8) {
+      uint64_t v = 0;
+      std::memcpy(&v, params.data() + off, 8);
+      const Buffer* b = v > 0x10000 ? Holding(v) : nullptr;
+      if (b != nullptr) found.push_back({off, *b});
+    }
+  }
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device)))) return;
-  std::lock_guard<std::mutex> g(buffers_m);
+  in_record_call = true;
   FILE* index = Open("dump\\index.txt", "a");
-  for (size_t off = 0; off + 8 <= params.size(); off += 8) {
+  for (const auto& [off, b] : found) {
     uint64_t v = 0;
     std::memcpy(&v, params.data() + off, 8);
-    const Buffer* b = v > 0x10000 ? Holding(v) : nullptr;
-    if (b == nullptr) continue;
-    bool seen = false;
-    for (const Pending& d : dumps) seen |= d.va == b->va && d.launch == k;
     if (index != nullptr) std::fprintf(index, "%d %zu %llx %llx %llu\n", k, off, (unsigned long long)v,
-                                       (unsigned long long)b->va, (unsigned long long)b->size);
+                                       (unsigned long long)b.va, (unsigned long long)b.size);
+    bool seen = false;
+    for (const Pending& d : dumps) seen |= d.va == b.va && d.launch == k;
     if (seen) continue;
     D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_READBACK};
     D3D12_RESOURCE_DESC rd = {};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = b->size;
+    rd.Width = b.size;
     rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     ID3D12Resource* rb = nullptr;
     if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                IID_PPV_ARGS(&rb)))) continue;
-    cmd->CopyBufferRegion(rb, 0, b->res, 0, b->size);
-    dumps.push_back({rb, b->va, b->size, k});
+    cmd->CopyBufferRegion(rb, 0, b.res, 0, b.size);
+    dumps.push_back({rb, b.va, b.size, k});
   }
   if (index != nullptr) std::fclose(index);
+  in_record_call = false;
   device->Release();
 }
 
