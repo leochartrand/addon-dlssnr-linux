@@ -152,6 +152,21 @@ inline int32_t __cdecl HookLaunchEx(ID3D12GraphicsCommandList* cmd, const Launch
 
 inline void* __cdecl HookQuery(uint32_t id) {
   void* f = real_query(id);
+  {   // every interface id asked for, once (which NVAPI paths NVIDIA's runtime uses here)
+    static std::mutex seen_m;
+    static uint32_t seen[512];
+    static uint32_t n_seen = 0;
+    std::lock_guard<std::mutex> g(seen_m);
+    bool known = false;
+    for (uint32_t i = 0; i < n_seen; ++i) known |= seen[i] == id;
+    if (!known && n_seen < 512) {
+      seen[n_seen++] = id;
+      if (FILE* q = Open("interfaces.txt", "a")) {
+        std::fprintf(q, "%08x %s\n", id, f != nullptr ? "yes" : "null");
+        std::fclose(q);
+      }
+    }
+  }
   if (f == nullptr) return f;
   switch (id) {
     case kCreateCuModule: real_module = (CreateCuModule)f; return (void*)&HookModule;
