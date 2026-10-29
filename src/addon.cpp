@@ -438,6 +438,32 @@ bool ProgramSize(const char* label, const char* prefix, char* value, size_t size
   return changed;
 }
 
+// Keeps the crop and periphery programs a working pair: a crop that reads scene context (crop-WxH-ctxAxB) needs
+// the periphery that exports it (low-AxB-ctx). After the crop changed (`crop_changed`) the periphery follows it;
+// after the periphery changed, the crop takes the matching variant of its size (with or without context).
+void PairPrograms(bool crop_changed) {
+  auto& s = nr_runner::s;
+  auto exists = [](const std::string& name) {
+    for (const std::string& n : nr_engine::Available(name[0] == 'c' ? "crop-" : "low-"))
+      if (n == name) return true;
+    return false;
+  };
+  const std::string crop = s.engine_crop, low = s.engine_low;
+  const size_t ctx = crop.find("-ctx");
+  const std::string crop_size = crop.substr(5, ctx == std::string::npos ? std::string::npos : ctx - 5);
+  if (crop_changed) {
+    if (ctx != std::string::npos) {
+      const std::string want = "low-" + crop.substr(ctx + 4) + "-ctx";
+      if (exists(want)) strncpy_s(s.engine_low, sizeof(s.engine_low), want.c_str(), _TRUNCATE);
+    }
+    return;
+  }
+  const size_t lctx = low.find("-ctx");
+  const std::string want = lctx != std::string::npos ? "crop-" + crop_size + "-ctx" + low.substr(4, lctx - 4)
+                                                     : "crop-" + crop_size;
+  if (want != crop && exists(want)) strncpy_s(s.engine_crop, sizeof(s.engine_crop), want.c_str(), _TRUNCATE);
+}
+
 // A slider with a reset-to-default button on its right.
 bool SliderWithReset(const char* label, float* value, float min, float max, const char* fmt,
                      float default_value) {
@@ -571,7 +597,10 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       if (two_calls && nr_engine::g.count > 0)
         changed |= ImGui::Checkbox("Free sizes (NGX only: any size, not just the engine programs')", &f.free_sizes);
       if (engine_sizes) {
-        changed |= ProgramSize("Crop size", "crop-", s.engine_crop, sizeof(s.engine_crop));
+        if (ProgramSize("Crop size", "crop-", s.engine_crop, sizeof(s.engine_crop))) {
+          PairPrograms(true);
+          changed = true;
+        }
       } else {
         changed |= SliderWithReset("Crop width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
         changed |= SliderWithReset("Crop height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
@@ -584,7 +613,10 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
         changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
                                    &f.periphery_pass);
       }
-      if (engine_sizes) changed |= ProgramSize("Periphery size", "low-", s.engine_low, sizeof(s.engine_low));
+      if (engine_sizes && ProgramSize("Periphery size", "low-", s.engine_low, sizeof(s.engine_low))) {
+        PairPrograms(false);
+        changed = true;
+      }
       else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
       if (two_calls && f.periphery_pass) {
         changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
