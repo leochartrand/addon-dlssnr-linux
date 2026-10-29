@@ -808,6 +808,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
     if (fov::g.reset) reset = 1;
     fov::g.reset = false;
     history_reset = reset != 0;
+  } else {
+    history_reset = reset != 0;   // the whole frame: the game's own resets
   }
 
   diag::Mark(cmd, diag::kSqueeze);
