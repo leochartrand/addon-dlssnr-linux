@@ -1,7 +1,7 @@
 // Split foveation: the full-size answer. Outside the crop: the input plus the whole-frame pass's
 // offset -- the low-res answer upsampled edge-aware, with the input's own finer detail on top. Inside: the
-// crop's answer with its coarse part swapped for the low-res answer's, blended in over g_feather
-// pixels from the crop's edge.
+// crop's answer with its coarse part swapped for the low-res answer's (g_crop_tone of the way: 1 swapped, 0 the
+// crop's own), blended in over g_feather pixels from the crop's edge.
 // g_pass_debug shows one pass alone, as the model saw and answered it: 1-3 the fovea crop (what it
 // sees, its answer, the change x20; outside the crop the input, dimmed), 4-6 the same for the
 // low-res whole-frame pass, stretched over the screen.
@@ -91,7 +91,7 @@ void main(uint3 id : SV_DispatchThreadID)
         float d = min(d2.x, d2.y);
         float w = g_feather > 0.0 ? smoothstep(0.0, g_feather, d) : 1.0;
         float4 a = Answer[uint2(c)];
-        float4 fovea = float4(saturate(a.rgb + off_fovea), a.a);
+        float4 fovea = float4(saturate(a.rgb + off_fovea * g_crop_tone), a.a);
         result = lerp(result, fovea, w);
     }
     Out[id.xy] = result;

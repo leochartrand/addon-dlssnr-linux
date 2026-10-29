@@ -41,7 +41,7 @@ constexpr uint32_t kRingSize = 8;         // frames of descriptors in flight
 enum Pass : uint32_t { kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
                        kSplitExpand, kPasses };
 constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the crop state), u0-u2
-constexpr uint32_t kConstants = 30;       // FovConstants in fov_common.hlsli
+constexpr uint32_t kConstants = 31;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
 
 // --- settings (persisted by addon.cpp) -----------------------------------
@@ -60,6 +60,11 @@ struct Settings {
   int split_calls = 2;         // split: 2 = a model call per region (independent grading), 1 = one
   float tone_smoothing = 0.95f; // split: weight of the carried tone history where the scene is still
   float tone_deadband = 0.01f;  // split: input change (display units) below which the tone holds
+  // Inside the crop, how much of its broad tone is the periphery's (1: one grading everywhere, the crop only adds
+  // detail) or the crop's own (0: closer to the full frame on what you look at, but the grading of the crop can
+  // differ from its surroundings). Measured 2026-10-29: the periphery's low-res tone is not the full frame's
+  // either, and the face came out further from the full frame the bigger the periphery.
+  float crop_tone = 1.0f;
   int global_every = 1;        // split: run the whole-frame pass every Nth frame (history between)
   // Split with two calls: a debug view of one pass alone (0 off, 1 what it sees, 2 its answer,
   // 3 what it changed x20). The fovea pass wins when both are set.
@@ -567,6 +572,7 @@ inline void SplitConstants(uint32_t* c, const SplitLayout& l, uint32_t full_w, u
   std::memcpy(&c[24], &feather, 4);
   c[25] = 0;
   std::memcpy(&c[26], &settings.grade_blur, 4);
+  std::memcpy(&c[30], &settings.crop_tone, 4);
 }
 
 // The crop pass's objects: its root signature ([0] root SRV t0 gaze, [1] root UAV u0 state,

@@ -154,6 +154,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::get_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::get_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
+  reshade::get_config_value(nullptr, kConfigSection, "CropToneFromPeriphery", f.crop_tone);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
   reshade::get_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
@@ -199,6 +200,7 @@ void LoadSettings() {
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
   f.tone_deadband = Clamp(f.tone_deadband, 0.0f, 0.1f);
+  f.crop_tone = Clamp(f.crop_tone, 0.0f, 1.0f);
   if (f.global_every < 1 || f.global_every > 4) f.global_every = 1;
 }
 
@@ -243,6 +245,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
   reshade::set_config_value(nullptr, kConfigSection, "ToneSmoothing", f.tone_smoothing);
   reshade::set_config_value(nullptr, kConfigSection, "ToneDeadband", f.tone_deadband);
+  reshade::set_config_value(nullptr, kConfigSection, "CropToneFromPeriphery", f.crop_tone);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalEvery", f.global_every);
   reshade::set_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
@@ -344,6 +347,7 @@ void PollLiveSettings() {
   f.split_calls = LiveInt(path, "SplitCalls", f.split_calls);
   f.tone_smoothing = LiveFloat(path, "ToneSmoothing", f.tone_smoothing);
   f.tone_deadband = LiveFloat(path, "ToneDeadband", f.tone_deadband);
+  f.crop_tone = Clamp(LiveFloat(path, "CropToneFromPeriphery", f.crop_tone), 0.0f, 1.0f);
   f.global_every = LiveInt(path, "GlobalEvery", f.global_every);
   f.fovea_debug = LiveInt(path, "FoveaDebugView", f.fovea_debug);
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
@@ -388,6 +392,7 @@ void PollLiveSettings() {
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
   f.tone_deadband = Clamp(f.tone_deadband, 0.0f, 0.1f);
+  f.crop_tone = Clamp(f.crop_tone, 0.0f, 1.0f);
   if (f.global_every < 1 || f.global_every > 4) f.global_every = 1;
 
   // The model reads these only when its feature is built; foveation geometry rebuilds by itself.
@@ -632,6 +637,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
       changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
       changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
+      changed |= SliderWithReset("Crop's broad tone from the periphery", &f.crop_tone, 0.0f, 1.0f,
+                                 f.crop_tone >= 1.0f ? "%.2f (one grading)" : f.crop_tone <= 0.0f ? "%.2f (its own)" : "%.2f",
+                                 1.0f);
 
       ImGui::SeparatorText("Gaze");
       changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");

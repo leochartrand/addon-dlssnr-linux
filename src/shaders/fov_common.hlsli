@@ -38,6 +38,7 @@ cbuffer FovConstants : register(b0)
                         // the reprojected history (1 = no history, 0 = history only: no new pass)
     float g_tone_deadband; // split blur V: input change (display units) below which the tone holds
     uint g_pass_debug;     // split expand: 0 off, 1-3 the fovea pass alone, 4-6 the periphery pass alone
+    float g_crop_tone;     // split expand: how much of the crop's broad tone is the periphery's (1) or its own (0)
 };
 
 // The crop's origin this frame and last, in full pixels, as fov_split_crop placed it on the GPU from
