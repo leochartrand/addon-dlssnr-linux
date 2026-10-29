@@ -3,10 +3,11 @@
 // list through NVAPI's cubin shaders. No translation at run time: the kernels are sm_86 machine code,
 // their parameters packed once at load against the D3D12 buffers that hold the engine's memory.
 //
-// One program per split region, each at its own field: <exe dir>\nr-engine\crop and \low (program.txt,
-// kernels\, segments\; without \low the crop's program runs both). They load on a thread of their own;
-// until they are ready the NGX features keep running. Split foveation snaps the regions to the fields
-// while the engine is on.
+// One program per split region, each at its own field, chosen by folder name in the nr-engine folder beside the exe
+// (program.txt, kernels\, segments\): crop-<w>x<h> for the crop, low-<w>x<h> for the periphery (without a
+// periphery program the crop's runs both). They load on a thread of their own; until they are ready the
+// NGX features keep running. Choosing other folders (Select) retires the loaded programs and loads those.
+// Split foveation snaps the regions to the fields.
 //
 // Per region and frame, NVIDIA's temporal loop (engine_common.hlsli):
 //   engine base: the per-pixel input block -- fresh noise (the frame number is the seed, as the library
@@ -105,6 +106,7 @@ struct Program {
 
 struct State {
   std::atomic<int> status{kIdle};
+  std::string names[kRegions] = {"crop-1024x576", "low-576x320"};   // the folders (Select)
   bool parsed = false;
   bool parse_failed = false;
   Program progs[kRegions];
@@ -266,13 +268,14 @@ inline bool Parse() {
   if (char* slash = std::strrchr(exe, '\\')) *slash = 0;
   const std::string root = std::string(exe) + "\\nr-engine\\";
   bool missing = false;
-  if (!ParseOne(g.progs[kCrop], root + "crop\\", &missing)) {
+  if (!ParseOne(g.progs[kCrop], root + g.names[kCrop] + "\\", &missing)) {
     g.parse_failed = true;
-    Fail(missing ? "no nr-engine\\crop\\program.txt beside the exe" : g.error);
+    if (missing) std::snprintf(g.error, sizeof(g.error), "no nr-engine\\%s\\program.txt", g.names[kCrop].c_str());
+    Fail(g.error);
     return false;
   }
   g.count = 1;
-  if (ParseOne(g.progs[kLow], root + "low\\", &missing)) {
+  if (ParseOne(g.progs[kLow], root + g.names[kLow] + "\\", &missing)) {
     g.count = 2;
   } else if (!missing) {
     g.parse_failed = true;
@@ -509,7 +512,7 @@ inline void Load(ID3D12Device* device) {
   bool ok = init != nullptr && create != nullptr && g.launch != nullptr;
   if (!ok) std::snprintf(g.error, sizeof(g.error), "NVAPI cubin entry points missing (PROTON_ENABLE_NVAPI=1)");
   if (ok) init();
-  if (ok && !CreatePipelines(device)) {
+  if (ok && g.root_sig == nullptr && !CreatePipelines(device)) {   // once: a Select reuses them
     ok = false;
     std::snprintf(g.error, sizeof(g.error), "engine pipelines");
   }
@@ -544,6 +547,48 @@ inline bool Ready(ID3D12GraphicsCommandList* cmd) {
   ngx_probe::Log("nr-engine: loading");
   std::thread(Load, device).detach();   // Load releases the device
   return false;
+}
+
+// The program folders present under nr-engine\ whose name starts with `prefix` ("crop-" or "low-").
+inline std::vector<std::string> Available(const char* prefix) {
+  std::vector<std::string> out;
+  char exe[MAX_PATH] = {};
+  GetModuleFileNameA(nullptr, exe, MAX_PATH);
+  if (char* slash = std::strrchr(exe, '\\')) *slash = 0;
+  const std::string root = std::string(exe) + "\\nr-engine\\";
+  WIN32_FIND_DATAA fd;
+  HANDLE h = FindFirstFileA((root + prefix + "*").c_str(), &fd);
+  if (h == INVALID_HANDLE_VALUE) return out;
+  do {
+    if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        GetFileAttributesA((root + fd.cFileName + "\\program.txt").c_str()) != INVALID_FILE_ATTRIBUTES)
+      out.push_back(fd.cFileName);
+  } while (FindNextFileA(h, &fd));
+  FindClose(h);
+  return out;
+}
+
+// Run these program folders (on the render thread, between frames). Loaded programs are retired -- their
+// buffers wait out the frames in flight -- and the new ones load in the background, NGX covering
+// meanwhile. Not while a load is under way (asked again next frame). The retired programs' cubin shaders
+// are not destroyed (NVAPI's destroy entry point is not wired up): a small leak per switch.
+inline void Select(const std::string& crop, const std::string& low) {
+  if ((crop.empty() || crop == g.names[kCrop]) && (low.empty() || low == g.names[kLow])) return;
+  if (g.status.load() == kLoading) return;
+  for (Program& p : g.progs) {
+    for (ID3D12Resource* r : p.segs)
+      if (r != nullptr) g.graves.push_back({r, (int)kRingSize + 2});
+    if (p.lift_buf != nullptr) g.graves.push_back({p.lift_buf, (int)kRingSize + 2});
+    p = Program{};
+  }
+  if (!crop.empty()) g.names[kCrop] = crop;
+  if (!low.empty()) g.names[kLow] = low;
+  g.count = 0;
+  g.parsed = g.parse_failed = false;
+  g.error[0] = 0;
+  g.ran_last[kCrop] = g.ran_last[kLow] = false;
+  g.status = kIdle;
+  ngx_probe::Logf("nr-engine: programs %s and %s selected", g.names[kCrop].c_str(), g.names[kLow].c_str());
 }
 
 inline const char* StatusText() {

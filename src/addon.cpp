@@ -159,6 +159,12 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::get_config_value(nullptr, kConfigSection, "NREngine", s.engine);
+  {
+    size_t n = sizeof(s.engine_crop);
+    reshade::get_config_value(nullptr, kConfigSection, "EngineCrop", s.engine_crop, &n);
+    n = sizeof(s.engine_low);
+    reshade::get_config_value(nullptr, kConfigSection, "EngineLow", s.engine_low, &n);
+  }
   reshade::get_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
   reshade::get_config_value(nullptr, kConfigSection, "FreeSizes", f.free_sizes);
   reshade::get_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
@@ -242,6 +248,8 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::set_config_value(nullptr, kConfigSection, "NREngine", s.engine);
+  reshade::set_config_value(nullptr, kConfigSection, "EngineCrop", s.engine_crop);
+  reshade::set_config_value(nullptr, kConfigSection, "EngineLow", s.engine_low);
   reshade::set_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
   reshade::set_config_value(nullptr, kConfigSection, "FreeSizes", f.free_sizes);
   reshade::set_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
@@ -263,6 +271,12 @@ float LiveFloat(const char* path, const char* key, float current) {
   char buf[64];
   GetPrivateProfileStringA("DLSSNR", key, "", buf, sizeof(buf), path);
   return buf[0] != 0 ? (float)atof(buf) : current;
+}
+
+// A string key, when present (left as it is otherwise).
+void LiveString(const char* path, const char* key, char* value, DWORD size) {
+  char buf[64] = {};
+  if (GetPrivateProfileStringA("DLSSNR", key, "", buf, sizeof(buf), path) > 0) strncpy_s(value, size, buf, _TRUNCATE);
 }
 
 int LiveInt(const char* path, const char* key, int current) {
@@ -335,6 +349,8 @@ void PollLiveSettings() {
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
+  LiveString(path, "EngineCrop", s.engine_crop, sizeof(s.engine_crop));
+  LiveString(path, "EngineLow", s.engine_low, sizeof(s.engine_low));
   f.crop_snap = LiveInt(path, "CropSnap", f.crop_snap);
   f.free_sizes = LiveInt(path, "FreeSizes", f.free_sizes ? 1 : 0) != 0;
   f.jump_reset = Clamp(LiveFloat(path, "GazeJumpReset", f.jump_reset), 0.02f, 2.0f);
@@ -502,6 +518,24 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
                             nr_engine::g.progs[nr_engine::g.count > 1 ? 1 : 0].field_h);
       else
         ImGui::TextDisabled("Engine: %s", nr_engine::StatusText());
+      // The program folders: they fix the crop's and the periphery's sizes (for NGX too, unless free sizes).
+      static std::vector<std::string> crops, lows;
+      if (crops.empty() || ImGui::SmallButton("Rescan programs")) {
+        crops = nr_engine::Available("crop-");
+        lows = nr_engine::Available("low-");
+      }
+      auto pick = [&](const char* label, char* value, size_t size, const std::vector<std::string>& list) {
+        if (ImGui::BeginCombo(label, value)) {
+          for (const std::string& n : list)
+            if (ImGui::Selectable(n.c_str(), n == value)) {
+              strncpy_s(value, size, n.c_str(), _TRUNCATE);
+              changed = true;
+            }
+          ImGui::EndCombo();
+        }
+      };
+      pick("Crop program", s.engine_crop, sizeof(s.engine_crop), crops);
+      pick("Periphery program", s.engine_low, sizeof(s.engine_low), lows);
       if (!two_calls)
         ImGui::TextDisabled("No engine program for the full frame yet: NGX runs it.");
       else if (f.free_sizes)

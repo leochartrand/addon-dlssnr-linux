@@ -185,6 +185,9 @@ struct State {
   // ...and its temporal loop: the network's own history blend (NVIDIA's), scaled by this (1 = as the
   // library does it, 0 = single frames).
   float engine_history = 1.0f;
+  // ...and the program folders it runs (nr-engine\<name>), which fix the regions' sizes.
+  char engine_crop[64] = "crop-1024x576";
+  char engine_low[64] = "low-576x320";
   uint32_t stamped = 0;         // diag stamps the engine marked this frame (bit per diag::Stamp)
   // NGX's NR features are released while our engine runs both split passes (they only stand by for it, and
   // two of them on top of a 4K game overflowed a 10 GB card); the setup (sizes, textures) stays. They are
@@ -980,6 +983,8 @@ inline bool EngineCovers() {
 // Shared by both entry points: housekeeping, then whether the pass may run this frame.
 inline bool Prepare(ID3D12GraphicsCommandList* cmd) {
   TickGraveyard();
+  nr_engine::Select(s.engine_crop, s.engine_low);
+  UpdateFrameSize();   // the programs' fields may have changed
   if (s.retire_pending.exchange(false, std::memory_order_relaxed))
     RetireFeature("model settings changed");
   // A slider drag used to rebuild the features every tick; the retired ones wait 240 frames each, so a
