@@ -229,7 +229,7 @@ void LoadSettings() {
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
   f.jump_reset = Clamp(f.jump_reset, 0.02f, 2.0f);
-  f.global_scale = Clamp(f.global_scale, 0.1f, 1.0f);
+  f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
   f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
@@ -422,7 +422,7 @@ void PollLiveSettings() {
   if (f.gaze_source < 0 || f.gaze_source > 1) f.gaze_source = 0;
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
-  f.global_scale = Clamp(f.global_scale, 0.1f, 1.0f);
+  f.global_scale = Clamp(f.global_scale, 0.1f, 0.5f);
   f.grade_blur = Clamp(f.grade_blur, 1.0f, 16.0f);
   if (f.split_calls != 1) f.split_calls = 2;
   f.tone_smoothing = Clamp(f.tone_smoothing, 0.0f, 0.95f);
