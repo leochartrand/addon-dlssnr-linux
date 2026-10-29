@@ -77,36 +77,6 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
 // pointers still works.
 void PollLiveSettings();  // below, with the rest of the settings code
 
-// Screenshot=<id> in the live ini: the presented image with the game's UI (ReShade's capture), written as
-// dlssnr-shot-<id>.raw (the back buffer's own bytes) + .txt header beside the exe, once per new id. Lets a
-// test script see menus without touching the desktop.
-int screenshot_requested = 0;
-
-void OnReshadePresent(reshade::api::effect_runtime* runtime) {
-  static int done = 0;
-  const int id = screenshot_requested;
-  if (id <= 0 || id == done || nr_runner::s.game_dir[0] == 0) return;
-  done = id;
-  uint32_t w = 0, h = 0;
-  runtime->get_screenshot_width_and_height(&w, &h);
-  const auto format = runtime->get_device()->get_resource_desc(runtime->get_current_back_buffer()).texture.format;
-  const uint32_t pitch = reshade::api::format_row_pitch(format, w);
-  if (w == 0 || h == 0 || pitch == 0) return;
-  std::vector<uint8_t> pixels(size_t(pitch) * h);
-  if (!runtime->capture_screenshot(pixels.data())) return;
-  wchar_t path[MAX_PATH];
-  swprintf_s(path, L"%s\\dlssnr-shot-%d.raw", nr_runner::s.game_dir, id);
-  if (FILE* f = _wfopen(path, L"wb")) {
-    fwrite(pixels.data(), 1, pixels.size(), f);
-    fclose(f);
-  }
-  swprintf_s(path, L"%s\\dlssnr-shot-%d.txt", nr_runner::s.game_dir, id);
-  if (FILE* f = _wfopen(path, L"wb")) {
-    std::fprintf(f, "width=%u\nheight=%u\nformat=%u\nrow_pitch=%u\n", w, h, (unsigned)format, pitch);
-    fclose(f);
-  }
-}
-
 void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain,
                const reshade::api::rect*, const reshade::api::rect*,
                uint32_t, const reshade::api::rect*) {
@@ -392,7 +362,6 @@ void PollLiveSettings() {
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
   diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
-  screenshot_requested = LiveInt(path, "Screenshot", screenshot_requested);
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
@@ -719,7 +688,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
     nr_runner::poll_live = PollLiveSettings;
     reshade::register_event<reshade::addon_event::present>(OnPresent);
-    reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
       ui_probe::Register();
       graded_hook::Register();
       ngx_probe::mark = ui_probe::Mark;
@@ -743,7 +711,6 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       ui_probe::Unregister();
       reshade::unregister_overlay(nullptr, OnDrawOverlay);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
-      reshade::unregister_event<reshade::addon_event::reshade_present>(OnReshadePresent);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::unregister_addon(h_module);
       break;
