@@ -236,14 +236,14 @@ inline void (*poll_live)() = nullptr;
 // something when DLSS-SR really upscales; at DLAA (input = output size) both modes are the same.
 // Split foveation always works on the output: its crop is there for the display's full resolution.
 inline void UpdateFrameSize() {
-  const bool split = fov::settings.enabled && fov::settings.split;
+  const bool split = fov::settings.enabled;
   const bool before = s.before_upscale && !s.graded && !split && s.render_w != 0 && s.render_h != 0 &&
                       (s.render_w != s.out_w || s.render_h != s.out_h);
   s.frame_w = before ? s.render_w : s.out_w;
   s.frame_h = before ? s.render_h : s.out_h;
   // The engine's programs fix the regions' sizes; NGX uses the same sizes whenever the programs exist, so
   // switching between the two changes only what runs the network, never what it is given.
-  const bool engine = split && fov::settings.split_calls == 2;
+  const bool engine = split && fov::settings.split_calls == 2 && !fov::settings.free_sizes;
   fov::settings.engine_crop_w = engine ? nr_engine::FieldW(nr_engine::kCrop) : 0;
   fov::settings.engine_crop_h = engine ? nr_engine::FieldH(nr_engine::kCrop) : 0;
   fov::settings.engine_low_w = engine ? nr_engine::FieldW(nr_engine::kLow) : 0;
@@ -252,10 +252,10 @@ inline void UpdateFrameSize() {
 
 // Model calls per frame the current settings ask for: 2 for split foveation in separate calls.
 inline int WantedCalls() {
-  return fov::settings.enabled && fov::settings.split && fov::settings.split_calls == 2 ? 2 : 1;
+  return fov::settings.enabled && fov::settings.split_calls == 2 ? 2 : 1;
 }
 
-// The size the NR feature runs at: the display resolution, or the squeezed working size.
+// The size the NR feature runs at: the display resolution, or the foveation's atlas.
 inline void FeatureSize(unsigned* w, unsigned* h) {
   *w = s.frame_w;
   *h = s.frame_h;
@@ -773,11 +773,10 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   ID3D12Resource* in_motion = motion;
   ID3D12Resource* answer = s.output;
   unsigned guide_w = s.render_w, guide_h = s.render_h;
-  // The mode is read once, so the expand below always matches the squeeze it follows.
-  const bool split = fov::settings.split;
+  const bool split = true;   // foveation is always the crop + low-res split
   bool history_reset = false;   // the game's reset or a new layout, before any per-call resets
   if (foveated) {
-    const bool squeezed = (split ? fov::SplitSqueeze : fov::Squeeze)(
+    const bool squeezed = fov::SplitSqueeze(
         cmd, s.proxy, depth, motion, s.frame_w, s.frame_h, s.render_w, s.render_h, mv_scale_x,
         mv_scale_y, s.eval_count);
     if (!squeezed || fov::g.x.work != s.feature_w || fov::g.y.work != s.feature_h) {
@@ -931,8 +930,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   for (diag::Stamp st : {diag::kCropBase, diag::kCropNet, diag::kLowBase})
     if ((s.stamped & (1u << st)) == 0) diag::Mark(cmd, st);
   diag::Mark(cmd, diag::kModel);
-  if (foveated && split) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
-  else if (foveated) fov::Expand(cmd, s.output, frame);
+  if (foveated) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
   diag::Mark(cmd, diag::kExpand);
 
   // Anchor the model's answer to the original and write the blend into the game's output, which
@@ -942,7 +940,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   nr_compose::RecordPost(cmd, color, s.color_copy, s.proxy, s.output, s.frame_w, s.frame_h,
                          s.eval_count, s.transfer, s.max_ratio, s.colour_strength, wp,
                          pass_debug ? 2u : (uint32_t)s.debug_view, ldr);
-  if (foveated && !pass_debug && s.debug_view == 4) fov::DebugMap(cmd, color, frame, split);
+  if (foveated && !pass_debug && s.debug_view == 4) fov::DebugMap(cmd, color, frame);
   diag::Mark(cmd, diag::kResolve);
   diag::End(cmd);
   {
@@ -966,7 +964,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
                 "centre_x=%.1f\ncentre_y=%.1f\ncolour=%.2f\nguard=%.2f\nwhite_point=%.4f\n",
                 foveated ? 1 : 0, foveated && split ? 1 : 0, fov::g.crop_x, fov::g.crop_y,
                 s.feature_w, s.feature_h, fov::settings.width,
-                fov::settings.height, fov::settings.falloff, fov::settings.edge,
+                fov::settings.height, fov::settings.falloff, 0.0f,
                 foveated ? fov::g.centre_x : s.frame_w * 0.5f, foveated ? fov::g.centre_y : s.frame_h * 0.5f,
                 s.colour_strength, s.max_ratio, wp);
   diag::Capture(cmd, s.color_copy, color, s.eval_count, info, ngx_probe::Log);
@@ -976,7 +974,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
 // Whether our engine runs both split passes now (NGX's features then only stand by).
 inline bool EngineCovers() {
   return s.engine && nr_engine::g.status.load() == nr_engine::kReady && fov::settings.enabled &&
-         fov::settings.split && WantedCalls() == 2 && fov::settings.engine_crop_w != 0;
+         WantedCalls() == 2 && fov::settings.engine_crop_w != 0;
 }
 
 // Shared by both entry points: housekeeping, then whether the pass may run this frame.

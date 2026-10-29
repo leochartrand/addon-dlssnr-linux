@@ -145,12 +145,10 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "FoveaWidth", f.width);
   reshade::get_config_value(nullptr, kConfigSection, "FoveaHeight", f.height);
   reshade::get_config_value(nullptr, kConfigSection, "FoveaFalloff", f.falloff);
-  reshade::get_config_value(nullptr, kConfigSection, "FoveaEdge", f.edge);
   reshade::get_config_value(nullptr, kConfigSection, "GazeSource", f.gaze_source);
   reshade::get_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
   reshade::get_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
   reshade::get_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
-  reshade::get_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
   reshade::get_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
   reshade::get_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
   reshade::get_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
@@ -162,6 +160,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::get_config_value(nullptr, kConfigSection, "NREngine", s.engine);
   reshade::get_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
+  reshade::get_config_value(nullptr, kConfigSection, "FreeSizes", f.free_sizes);
   reshade::get_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
 
   // A hand-edited ini must not push values past what the overlay allows.
@@ -185,7 +184,6 @@ void LoadSettings() {
   f.width = Clamp(f.width, 0.05f, 1.0f);
   f.height = Clamp(f.height, 0.05f, 1.0f);
   f.falloff = Clamp(f.falloff, 0.0f, 0.5f);
-  f.edge = Clamp(f.edge, 0.25f, 1.0f);
   if (f.gaze_source < 0 || f.gaze_source > 1) f.gaze_source = 0;
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
@@ -230,12 +228,10 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "FoveaWidth", f.width);
   reshade::set_config_value(nullptr, kConfigSection, "FoveaHeight", f.height);
   reshade::set_config_value(nullptr, kConfigSection, "FoveaFalloff", f.falloff);
-  reshade::set_config_value(nullptr, kConfigSection, "FoveaEdge", f.edge);
   reshade::set_config_value(nullptr, kConfigSection, "GazeSource", f.gaze_source);
   reshade::set_config_value(nullptr, kConfigSection, "GazePort", f.gaze_port);
   reshade::set_config_value(nullptr, kConfigSection, "GazeSmoothMs", f.gaze_smooth_ms);
   reshade::set_config_value(nullptr, kConfigSection, "GazeJumpReset", f.jump_reset);
-  reshade::set_config_value(nullptr, kConfigSection, "FoveaSplit", f.split);
   reshade::set_config_value(nullptr, kConfigSection, "GlobalScale", f.global_scale);
   reshade::set_config_value(nullptr, kConfigSection, "GradeBlur", f.grade_blur);
   reshade::set_config_value(nullptr, kConfigSection, "SplitCalls", f.split_calls);
@@ -247,6 +243,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::set_config_value(nullptr, kConfigSection, "NREngine", s.engine);
   reshade::set_config_value(nullptr, kConfigSection, "CropSnap", f.crop_snap);
+  reshade::set_config_value(nullptr, kConfigSection, "FreeSizes", f.free_sizes);
   reshade::set_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
 }
 
@@ -325,11 +322,9 @@ void PollLiveSettings() {
   f.width = LiveFloat(path, "FoveaWidth", f.width);
   f.height = LiveFloat(path, "FoveaHeight", f.height);
   f.falloff = LiveFloat(path, "FoveaFalloff", f.falloff);
-  f.edge = LiveFloat(path, "FoveaEdge", f.edge);
   f.gaze_source = LiveInt(path, "GazeSource", f.gaze_source);
   f.gaze_port = LiveInt(path, "GazePort", f.gaze_port);
   f.gaze_smooth_ms = LiveFloat(path, "GazeSmoothMs", f.gaze_smooth_ms);
-  f.split = LiveInt(path, "FoveaSplit", f.split ? 1 : 0) != 0;
   f.global_scale = LiveFloat(path, "GlobalScale", f.global_scale);
   f.grade_blur = LiveFloat(path, "GradeBlur", f.grade_blur);
   f.split_calls = LiveInt(path, "SplitCalls", f.split_calls);
@@ -341,6 +336,7 @@ void PollLiveSettings() {
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   f.crop_snap = LiveInt(path, "CropSnap", f.crop_snap);
+  f.free_sizes = LiveInt(path, "FreeSizes", f.free_sizes ? 1 : 0) != 0;
   f.jump_reset = Clamp(LiveFloat(path, "GazeJumpReset", f.jump_reset), 0.02f, 2.0f);
   if (f.crop_snap < 0 || f.crop_snap > 256) f.crop_snap = 32;
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
@@ -368,7 +364,6 @@ void PollLiveSettings() {
   f.width = Clamp(f.width, 0.05f, 1.0f);
   f.height = Clamp(f.height, 0.05f, 1.0f);
   f.falloff = Clamp(f.falloff, 0.0f, 0.5f);
-  f.edge = Clamp(f.edge, 0.25f, 1.0f);
   if (f.gaze_source < 0 || f.gaze_source > 1) f.gaze_source = 0;
   if (f.gaze_port < 1024 || f.gaze_port > 65535) f.gaze_port = 47620;
   f.gaze_smooth_ms = Clamp(f.gaze_smooth_ms, 0.0f, 500.0f);
@@ -416,7 +411,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   auto& s = nr_runner::s;
   auto& f = fov::settings;
   bool changed = false;
-  const bool split = f.enabled && f.split;
+  const bool split = f.enabled;
   const bool two_calls = split && f.split_calls == 2;
   const bool engine_sizes = two_calls && f.engine_crop_w != 0;   // the engine's programs fix both regions' sizes
 
@@ -508,7 +503,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       else
         ImGui::TextDisabled("Engine: %s", nr_engine::StatusText());
       if (!two_calls)
-        ImGui::TextDisabled("No engine program for this mode's size yet: NGX runs it.");
+        ImGui::TextDisabled("No engine program for the full frame yet: NGX runs it.");
+      else if (f.free_sizes)
+        ImGui::TextDisabled("Free sizes are on (Foveation): NGX runs the regions.");
       changed |= SliderWithReset("Engine history (1 = NVIDIA's)", &s.engine_history, 0.0f, 1.0f, "%.2f", 1.0f);
     }
     if (s.preset != 0 || (two_calls && f.periphery_pass && s.split_global_preset > 0))
@@ -519,50 +516,39 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
   if (ImGui::CollapsingHeader("Foveation", ImGuiTreeNodeFlags_DefaultOpen)) {
     changed |= ImGui::Checkbox("Foveated NR", &f.enabled);
     if (f.enabled) {
-      int mode = f.split ? 1 : 0;
-      ImGui::SameLine();
-      if (ImGui::RadioButton("Squeezed frame", &mode, 0)) { f.split = false; changed = true; }
-      ImGui::SameLine();
-      if (ImGui::RadioButton("Crop + low-res frame", &mode, 1)) { f.split = true; changed = true; }
-
-      if (!f.split) {
-        changed |= SliderWithReset("Fovea width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
-        changed |= SliderWithReset("Fovea height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
-        changed |= SliderWithReset("Falloff", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
-        changed |= SliderWithReset("Edge resolution", &f.edge, 0.25f, 1.0f, "%.2f", 0.50f);
+      ImGui::SeparatorText("The crop (full resolution, around the gaze)");
+      if (two_calls && nr_engine::g.count > 0)
+        changed |= ImGui::Checkbox("Free sizes (NGX only: ignore the engine programs' sizes)", &f.free_sizes);
+      if (engine_sizes) {
+        ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_crop_w, f.engine_crop_h);
       } else {
-        ImGui::SeparatorText("The crop (full resolution, around the gaze)");
-        if (engine_sizes) {
-          ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_crop_w, f.engine_crop_h);
-        } else {
-          changed |= SliderWithReset("Crop width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
-          changed |= SliderWithReset("Crop height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
-        }
-        changed |= ImGui::SliderInt("Crop snap", &f.crop_snap, 0, 256, f.crop_snap <= 1 ? "follows the gaze exactly" : "%d px");
-        changed |= SliderWithReset("Edge blend", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
-
-        ImGui::SeparatorText("The periphery (the whole frame, low resolution)");
-        if (two_calls) {
-          changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
-                                     &f.periphery_pass);
-        }
-        if (engine_sizes) ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_low_w, f.engine_low_h);
-        else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
-        if (two_calls && f.periphery_pass) {
-          changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
-          ImGui::TextDisabled("Its model controls are under Model, beside the crop's.");
-        }
-
-        ImGui::SeparatorText("How the two are combined");
-        bool two = f.split_calls == 2;
-        if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
-          f.split_calls = two ? 2 : 1;
-          changed = true;
-        }
-        changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
-        changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
-        changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
+        changed |= SliderWithReset("Crop width", &f.width, 0.05f, 1.0f, "%.2f of the frame", 0.40f);
+        changed |= SliderWithReset("Crop height", &f.height, 0.05f, 1.0f, "%.2f of the frame", 0.50f);
       }
+      changed |= ImGui::SliderInt("Crop snap", &f.crop_snap, 0, 256, f.crop_snap <= 1 ? "follows the gaze exactly" : "%d px");
+      changed |= SliderWithReset("Edge blend", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
+
+      ImGui::SeparatorText("The periphery (the whole frame, low resolution)");
+      if (two_calls) {
+        changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
+                                   &f.periphery_pass);
+      }
+      if (engine_sizes) ImGui::TextDisabled("%ux%u, set by the engine's programs (NGX uses it too)", f.engine_low_w, f.engine_low_h);
+      else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
+      if (two_calls && f.periphery_pass) {
+        changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
+        ImGui::TextDisabled("Its model controls are under Model, beside the crop's.");
+      }
+
+      ImGui::SeparatorText("How the two are combined");
+      bool two = f.split_calls == 2;
+      if (ImGui::Checkbox("A model call per region (independent grading)", &two)) {
+        f.split_calls = two ? 2 : 1;
+        changed = true;
+      }
+      changed |= SliderWithReset("Tone blur", &f.grade_blur, 1.0f, 16.0f, "%.1f px", 1.0f);
+      changed |= SliderWithReset("Tone smoothing", &f.tone_smoothing, 0.0f, 0.95f, "%.2f", 0.95f);
+      changed |= SliderWithReset("Tone dead band", &f.tone_deadband, 0.0f, 0.1f, "%.3f", 0.01f);
 
       ImGui::SeparatorText("Gaze");
       changed |= ImGui::Combo("Fovea centre", &f.gaze_source, "Fixed (frame centre)\0Gaze over UDP\0");
