@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -84,6 +85,7 @@ struct Program {
   std::vector<Kernel> kernels;
   std::vector<uint64_t> seg_size;
   std::vector<std::string> seg_file;
+  std::vector<std::string> seg_hash;   // the contents' sha1 (weights and constants): shared between programs
   std::vector<bool> seg_used;
   std::vector<Launch> launches;
   uint32_t in_seg = 0, out_seg = 0, hist_seg = 0;
@@ -104,8 +106,16 @@ struct Program {
   D3D12_GPU_VIRTUAL_ADDRESS Va(uint32_t seg, uint64_t off) const { return segs[seg]->GetGPUVirtualAddress() + off; }
 };
 
+// Segments with the same contents (the weights) are one buffer for every loaded program, as NVIDIA's library
+// keeps one copy of its network: keyed by size and hash, counted by the programs using it.
+struct SharedSeg {
+  ID3D12Resource* r = nullptr;
+  int refs = 0;
+};
+
 struct State {
   std::atomic<int> status{kIdle};
+  std::map<std::string, SharedSeg> shared;   // touched by the loader thread and by Select, never at once
   std::string names[kRegions] = {"crop-1024x576", "low-896x512"};   // the folders (Select)
   bool parsed = false;
   bool parse_failed = false;
@@ -167,10 +177,11 @@ inline bool ParseOne(Program& p, const std::string& dir, bool* missing) {
       p.kernels.push_back(k);
     } else if (tag == "S") {
       uint64_t n = 0;
-      std::string file;
-      s >> n >> file;
+      std::string file, hash;
+      s >> n >> file >> hash;   // the hash is absent in older programs
       p.seg_size.push_back(n);
       p.seg_file.push_back(file);
+      p.seg_hash.push_back(hash);
     } else if (tag == "L") {
       Launch L;
       uint32_t n = 0;
@@ -427,6 +438,15 @@ inline bool LoadProgram(ID3D12Device* device, Program& p, CreateCubinEx_t create
   for (size_t i = 0; i < p.seg_size.size(); ++i) {
     if (!p.seg_used[i]) continue;
     const bool has_file = p.seg_file[i] != "-";
+    const std::string key = has_file && !p.seg_hash[i].empty() ? std::to_string(p.seg_size[i]) + ":" + p.seg_hash[i] : "";
+    if (!key.empty()) {
+      auto it = g.shared.find(key);
+      if (it != g.shared.end()) {   // another program's copy
+        p.segs[i] = it->second.r;
+        ++it->second.refs;
+        continue;
+      }
+    }
     const D3D12_RESOURCE_DESC d = BufferDesc(p.seg_size[i], true);
     if (FAILED(device->CreateCommittedResource(&def, D3D12_HEAP_FLAG_NONE, &d,
                                                has_file ? D3D12_RESOURCE_STATE_COPY_DEST
@@ -456,6 +476,7 @@ inline bool LoadProgram(ID3D12Device* device, Program& p, CreateCubinEx_t create
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
     up.list->ResourceBarrier(1, &b);
     up.Submit();
+    if (!key.empty()) g.shared[key] = {p.segs[i], 1};
   }
 
   // The lift, for engine_base.
@@ -576,8 +597,18 @@ inline void Select(const std::string& crop, const std::string& low) {
   if ((crop.empty() || crop == g.names[kCrop]) && (low.empty() || low == g.names[kLow])) return;
   if (g.status.load() == kLoading) return;
   for (Program& p : g.progs) {
-    for (ID3D12Resource* r : p.segs)
-      if (r != nullptr) g.graves.push_back({r, (int)kRingSize + 2});
+    for (size_t i = 0; i < p.segs.size(); ++i) {
+      ID3D12Resource* r = p.segs[i];
+      if (r == nullptr) continue;
+      const std::string key = i < p.seg_hash.size() && !p.seg_hash[i].empty()
+                                  ? std::to_string(p.seg_size[i]) + ":" + p.seg_hash[i] : "";
+      auto it = key.empty() ? g.shared.end() : g.shared.find(key);
+      if (it != g.shared.end()) {
+        if (--it->second.refs > 0) continue;   // still in another program
+        g.shared.erase(it);
+      }
+      g.graves.push_back({r, (int)kRingSize + 2});
+    }
     if (p.lift_buf != nullptr) g.graves.push_back({p.lift_buf, (int)kRingSize + 2});
     p = Program{};
   }
