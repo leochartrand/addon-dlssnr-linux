@@ -414,8 +414,10 @@ bool ProgramSize(const char* label, const char* prefix, char* value, size_t size
     unsigned w = 0, h = 0;
     char text[160];
     if (std::sscanf(name.c_str() + std::strlen(prefix), "%ux%u", &w, &h) == 2 && fw != 0 && fh != 0)
-      std::snprintf(text, sizeof(text), "%ux%u  (%.0f%% x %.0f%% of %ux%u, %.1f%% of the pixels)", w, h,
-                    100.0 * w / fw, 100.0 * h / fh, fw, fh, 100.0 * w * h / ((double)fw * fh));
+      std::snprintf(text, sizeof(text), "%ux%u  (%.0f%% x %.0f%% of %ux%u, %.1f%% of the pixels)%s", w, h,
+                    100.0 * w / fw, 100.0 * h / fh, fw, fh, 100.0 * w * h / ((double)fw * fh),
+                    name.find("-ctx") == std::string::npos ? ""
+                    : prefix[0] == 'c' ? " + scene context (needs its periphery)" : " + exports scene context");
     else
       std::snprintf(text, sizeof(text), "%s", name.c_str());
     return std::string(text);
