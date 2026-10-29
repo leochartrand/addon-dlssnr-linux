@@ -407,6 +407,14 @@ void PollLiveSettings() {
     }
   }
   nv_record::replay = LiveInt(path, "ReplayNV", nv_record::replay ? 1 : 0) != 0;
+  {
+    static int last_profile = 0;   // ProfileNV=<n>: a new value times the next n replays launch by launch
+    const int v = LiveInt(path, "ProfileNV", last_profile);
+    if (v != last_profile) {
+      last_profile = v;
+      if (v > 0) nv_record::profile_requested = v;
+    }
+  }
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);

@@ -21,6 +21,7 @@
 #include <d3d12.h>
 #include <detours.h>
 
+#include "diag.hpp"
 #include "ngx_probe.hpp"
 
 namespace nv_record {
@@ -69,6 +70,14 @@ struct Recorded {
 };
 inline std::vector<Recorded> chain, building;
 inline bool replay = false;      // ReplayNV=1: the runner launches the recorded chain itself instead of evaluating
+inline std::vector<std::pair<void*, std::string>> names;   // shader handle -> name (as created)
+// ProfileNV=<n>: n replays with a GPU timestamp after every launch, written to nv-record\profile.txt.
+inline int profile_requested = 0;
+inline ID3D12QueryHeap* qheap = nullptr;
+inline ID3D12Resource* qread = nullptr;
+inline int pending = -1;          // replays until the last profiled one's timestamps are safe to read
+inline std::vector<double> sums;  // per launch, ms summed over the profiled replays
+inline int profiled = 0;
 inline uint32_t counter = 0;     // the chain's frame counter (launch 1, offset 208: the noise seed)
 
 inline FILE* Open(const char* name, const char* mode) {
@@ -114,6 +123,7 @@ inline void Created(void* shader, const void* cubin, uint32_t size, uint32_t bx,
     std::fwrite(cubin, 1, size, f);
     std::fclose(f);
   }
+  names.emplace_back(shader, name != nullptr ? name : "-");
   if (FILE* f = Open("shaders.txt", "a")) {
     std::fprintf(f, "S %p %u %u %u %u %u %u %s\n", shader, shaders, size, bx, by, bz, shared,
                  name != nullptr ? name : "-");
@@ -163,10 +173,72 @@ inline int32_t __cdecl HookLaunch(ID3D12GraphicsCommandList* cmd, void* shader, 
 // The replay test: the recorded chain launched on `cmd` as NVIDIA's runtime launched it, the frame counter
 // advanced (or held, with `hold`: the recorded frame again, for a bit-exact check), a UAV barrier after each launch
 // (the safe order; NVIDIA's runtime may overlap its chained kernels). False when there is nothing to replay.
+inline const char* NameOf(void* shader) {
+  for (const auto& n : names)
+    if (n.first == shader) return n.second.c_str();
+  return "?";
+}
+
+// The timestamps of the profiled replay four replays ago (no longer in flight): added up per launch; after the last
+// requested one, the averages go to profile.txt.
+inline void CollectProfile() {
+  if (pending < 0 || --pending > 0) return;
+  pending = -1;
+  const size_t n = chain.size() + 1;
+  uint64_t* t = nullptr;
+  D3D12_RANGE range = {0, n * 8};
+  if (FAILED(qread->Map(0, &range, reinterpret_cast<void**>(&t)))) return;
+  const double freq = (double)diag::timestamp_freq.load();
+  sums.resize(chain.size(), 0.0);
+  for (size_t i = 0; i < chain.size() && freq > 0; ++i) sums[i] += (double)(t[i + 1] - t[i]) * 1000.0 / freq;
+  D3D12_RANGE none = {0, 0};
+  qread->Unmap(0, &none);
+  ++profiled;
+  if (profile_requested > 0) return;
+  if (FILE* f = Open("profile.txt", "w")) {
+    double total = 0.0;
+    for (size_t i = 0; i < chain.size(); ++i) total += sums[i] / profiled;
+    std::fprintf(f, "# %d replays, %.3f ms per replay (launch, ms, grid, name)\n", profiled, total);
+    for (size_t i = 0; i < chain.size(); ++i)
+      std::fprintf(f, "%3zu %8.4f %5u %5u %3u %s\n", i, sums[i] / profiled, chain[i].gx, chain[i].gy, chain[i].gz,
+                   NameOf(chain[i].shader));
+    std::fclose(f);
+  }
+  ngx_probe::Logf("nv-record: profile of %d replays written", profiled);
+  sums.clear();
+  profiled = 0;
+}
+
 inline bool Replay(ID3D12GraphicsCommandList* cmd, bool hold) {
   std::lock_guard<std::mutex> g(m);
   if (chain.empty() || real_launch == nullptr) return false;
+  CollectProfile();
   if (!hold) ++counter;
+  // Timestamps for this replay when a profile is asked for and the last one has been read.
+  bool timed = false;
+  const uint32_t n = (uint32_t)chain.size() + 1;
+  if (profile_requested > 0 && pending < 0) {
+    ID3D12Device* device = nullptr;
+    if (qheap == nullptr && SUCCEEDED(cmd->GetDevice(IID_PPV_ARGS(&device)))) {
+      D3D12_QUERY_HEAP_DESC qd = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 256, 0};
+      device->CreateQueryHeap(&qd, IID_PPV_ARGS(&qheap));
+      D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_READBACK};
+      D3D12_RESOURCE_DESC rd = {};
+      rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      rd.Width = 256 * 8;
+      rd.Height = rd.DepthOrArraySize = rd.MipLevels = 1;
+      rd.SampleDesc.Count = 1;
+      rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                      IID_PPV_ARGS(&qread));
+      device->Release();
+    }
+    timed = qheap != nullptr && qread != nullptr && n <= 256;
+    if (timed) {
+      --profile_requested;
+      cmd->EndQuery(qheap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    }
+  }
   D3D12_RESOURCE_BARRIER all = {};
   all.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
   std::vector<uint8_t> p;
@@ -176,6 +248,11 @@ inline bool Replay(ID3D12GraphicsCommandList* cmd, bool hold) {
     if (i == 1 && p.size() >= 212) std::memcpy(p.data() + 208, &counter, 4);
     if (real_launch(cmd, r.shader, r.gx, r.gy, r.gz, p.data(), (uint32_t)p.size()) != 0) return false;
     cmd->ResourceBarrier(1, &all);
+    if (timed) cmd->EndQuery(qheap, D3D12_QUERY_TYPE_TIMESTAMP, (UINT)i + 1);
+  }
+  if (timed) {
+    cmd->ResolveQueryData(qheap, D3D12_QUERY_TYPE_TIMESTAMP, 0, n, qread, 0);
+    pending = 4;
   }
   return true;
 }
