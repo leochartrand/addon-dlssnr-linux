@@ -207,6 +207,51 @@ inline D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE HookGva(ID3D12Resource* self)
   return va;
 }
 
+// CaptureUAVInfo (how NVIDIA's runtime gets its buffers' addresses): it reports the address range of the UAV last
+// created on the device, so CreateUnorderedAccessView (device vtable slot 19) remembers that UAV's resource and the
+// capture pairs the two.
+struct UavInfo {
+  uint32_t version, surface;
+  uint64_t va, size;
+};
+using CaptureUav = int32_t(__cdecl*)(ID3D12Device*, UavInfo*);
+using CreateUav = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, ID3D12Resource*,
+                                            const D3D12_UNORDERED_ACCESS_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+constexpr uint32_t kCaptureUav = 0x6e5ea9db;   // NvAPI_D3D12_CaptureUAVInfo
+inline CaptureUav real_capture = nullptr;
+inline CreateUav real_create_uav = nullptr;
+inline thread_local ID3D12Resource* last_uav = nullptr;
+
+inline void STDMETHODCALLTYPE HookCreateUav(ID3D12Device* self, ID3D12Resource* res, ID3D12Resource* counter,
+                                            const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc,
+                                            D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+  last_uav = res;
+  real_create_uav(self, res, counter, desc, handle);
+}
+
+inline int32_t __cdecl HookCapture(ID3D12Device* device, UavInfo* info) {
+  const int32_t r = real_capture(device, info);
+  if (r == 0 && info != nullptr && last_uav != nullptr && info->va != 0) {
+    const D3D12_RESOURCE_DESC d = last_uav->GetDesc();
+    std::lock_guard<std::mutex> g(buffers_m);
+    bool known = false;
+    for (Buffer& b : buffers)
+      if (b.res == last_uav) {
+        b.va = info->va;
+        b.size = d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? d.Width : info->size;
+        known = true;
+      }
+    if (!known && d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) buffers.push_back({last_uav, info->va, d.Width});
+    if (FILE* f = Open("uavs.txt", "a")) {
+      std::fprintf(f, "U %llx %llu dim %d width %llu height %u format %d\n", (unsigned long long)info->va,
+                   (unsigned long long)info->size, (int)d.Dimension, (unsigned long long)d.Width, d.Height,
+                   (int)d.Format);
+      std::fclose(f);
+    }
+  }
+  return r;
+}
+
 inline void OnInitDevice(reshade::api::device* device) {
   if (real_gva != nullptr || device->get_api() != reshade::api::device_api::d3d12) return;
   auto* d = reinterpret_cast<ID3D12Device*>(device->get_native());
@@ -222,11 +267,13 @@ inline void OnInitDevice(reshade::api::device* device) {
                                         IID_PPV_ARGS(&probe)))) return;
   real_gva = reinterpret_cast<Gva>((*reinterpret_cast<void***>(probe))[11]);
   probe->Release();
+  real_create_uav = reinterpret_cast<CreateUav>((*reinterpret_cast<void***>(d))[19]);
   DetourTransactionBegin();
   DetourUpdateThread(GetCurrentThread());
   DetourAttach(reinterpret_cast<PVOID*>(&real_gva), reinterpret_cast<PVOID>(&HookGva));
+  DetourAttach(reinterpret_cast<PVOID*>(&real_create_uav), reinterpret_cast<PVOID>(&HookCreateUav));
   const LONG r = DetourTransactionCommit();
-  ngx_probe::Logf("nv-record: GetGPUVirtualAddress hooked (%ld)", r);
+  ngx_probe::Logf("nv-record: GetGPUVirtualAddress and CreateUnorderedAccessView hooked (%ld)", r);
 }
 
 inline const Buffer* Holding(uint64_t va) {
@@ -419,6 +466,7 @@ inline void* __cdecl HookQuery(uint32_t id) {
     case kCreateEx: real_ex = (CreateEx)f; return (void*)&HookEx;
     case kCreateExV2: real_ex_v2 = (CreateExV2)f; return (void*)&HookExV2;
     case kLaunch: real_launch = (Launch)f; return (void*)&HookLaunch;
+    case kCaptureUav: real_capture = (CaptureUav)f; return (void*)&HookCapture;
     default: return f;
   }
 }
@@ -450,8 +498,10 @@ inline void Unregister() {
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourDetach(reinterpret_cast<PVOID*>(&real_gva), reinterpret_cast<PVOID>(&HookGva));
+    DetourDetach(reinterpret_cast<PVOID*>(&real_create_uav), reinterpret_cast<PVOID>(&HookCreateUav));
     DetourTransactionCommit();
     real_gva = nullptr;
+    real_create_uav = nullptr;
   }
 }
 
