@@ -432,11 +432,13 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     else ImGui::TextDisabled("Measured white point: (measuring...)");
   }
 
-  if (ImGui::CollapsingHeader(two_calls ? "Model: the crop (NVIDIA's controls)" : "Model (NVIDIA's controls)",
-                              ImGuiTreeNodeFlags_DefaultOpen)) {
+  if (ImGui::CollapsingHeader("Model (NVIDIA's controls)", ImGuiTreeNodeFlags_DefaultOpen)) {
     // NR intensity is the model's overall hand; Structure intensity the fine detail it synthesises; Global
     // intensity the broad tone (its relighting). Style: NVIDIA's processing profiles (names from community
-    // testing via OptiScaler_DLSSNR). Our engine reads these live; NGX only at a rebuild (Apply).
+    // testing via OptiScaler_DLSSNR). With two calls, each region has its own set, side by side. Our engine
+    // reads these live; NGX only at a rebuild (Apply).
+    const bool periphery = two_calls && f.periphery_pass;
+    if (periphery) ImGui::SeparatorText("The crop");
     changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 2.0f, "%.2f", 1.0f);
     changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 2.0f, "%.2f", 1.0f);
     changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 2.0f, "%.2f", 1.0f);
@@ -444,7 +446,21 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     if (s.style > 2) s.style = 2;
     changed |= ImGui::Combo("Style", &s.style, "Default (standard)\0Natural\0Cinematic\0");
     changed |= ImGui::SliderInt("Preset (NGX only)", &s.preset, 0, 7);
-    if (ImGui::TreeNode("NVIDIA's advanced options")) {
+    if (periphery) {
+      ImGui::SeparatorText("The periphery");
+      bool model = false;
+      model |= SliderWithReset("NR intensity##periphery", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Skin detail (-1 = structure)##periphery", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
+      model |= ImGui::Combo("Style##periphery", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
+      model |= ImGui::SliderInt("Preset (NGX only)##periphery", &s.split_global_preset, -1, 7,
+                                s.split_global_preset < 0 ? "same as the crop" : "%d");
+      if (model) nr_runner::ApplyModelSettings();
+      changed |= model;
+      ImGui::Spacing();
+    }
+    if (ImGui::TreeNode("NVIDIA's advanced options (both regions)")) {
       // -1 (or 0 for the ratio) leaves the library's default. Our engine reads the skin mask; the rest is NGX's.
       changed |= ImGui::SliderInt("Skin mask (-1 default, 0 off, 1 on)", &s.auto_mask, -1, 1);
       changed |= ImGui::SliderInt("UI correction (-1 default, NGX only)", &s.ui_correction, -1, 1);
@@ -510,19 +526,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
         else changed |= SliderWithReset("Low-res frame", &f.global_scale, 0.1f, 0.5f, "%.2f of the frame", 0.25f);
         if (two_calls && f.periphery_pass) {
           changed |= ImGui::SliderInt("Run every", &f.global_every, 1, 4, f.global_every == 1 ? "frame" : "%d frames");
-          bool model = false;
-          if (ImGui::TreeNode("Its model (NVIDIA's controls)")) {
-            model |= SliderWithReset("NR intensity##periphery", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);
-            model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 2.0f, "%.2f", 1.0f);
-            model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
-            model |= SliderWithReset("Skin detail (-1 = its structure)##periphery", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
-            model |= ImGui::Combo("Style##periphery", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
-            model |= ImGui::SliderInt("Preset (NGX only)##periphery", &s.split_global_preset, -1, 7,
-                                      s.split_global_preset < 0 ? "same as the crop" : "%d");
-            ImGui::TreePop();
-          }
-          if (model) nr_runner::ApplyModelSettings();
-          changed |= model;
+          ImGui::TextDisabled("Its model controls are under Model, beside the crop's.");
         }
 
         ImGui::SeparatorText("How the two are combined");
