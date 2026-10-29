@@ -23,10 +23,13 @@ namespace diag {
 
 constexpr uint32_t kRing = 16;   // frames a timestamp slot or a dump waits before it is read back
 // The model's span is split per region when our engine runs it (its input block, then its network); with
-// NGX, or a region that did not run, those stamps fall at the end of the model.
-enum Stamp : uint32_t { kStart, kEncode, kSqueeze, kCropBase, kCropNet, kLowBase, kModel, kExpand, kResolve, kStamps };
+// NGX, or a region that did not run, those stamps fall at the end of the model. The regions may run in either
+// order (the periphery first when the crop reads its scene context): a stage is the time from the stamp just
+// before it in time to its own.
+enum Stamp : uint32_t { kStart, kEncode, kSqueeze, kCropBase, kCropNet, kLowBase, kLowNet, kModel, kExpand, kResolve,
+                        kStamps };
 constexpr const char* kStageNames[kStamps - 1] = {"encode", "squeeze", "crop-noise", "crop-net", "low-noise",
-                                                  "low-net", "expand", "resolve"};
+                                                  "low-net", "model-rest", "expand", "resolve"};
 constexpr uint32_t kReportEvery = 300;
 
 // Ticks per second of the queue's timestamps, from the present hook (0 until known).
@@ -105,9 +108,15 @@ inline void Begin(ID3D12GraphicsCommandList* cmd, uint32_t frame, LogFn log) {
     if (SUCCEEDED(t.readback->Map(0, &range, &p))) {
       const uint64_t* ts = (const uint64_t*)((const char*)p + range.Begin);
       bool sane = true;
-      for (uint32_t i = 1; i < kStamps; ++i) sane &= ts[i] >= ts[i - 1];
+      for (uint32_t i = 1; i < kStamps; ++i) sane &= ts[i] >= ts[0] && ts[i] <= ts[kStamps - 1];
       if (sane) {
-        for (uint32_t i = 1; i < kStamps; ++i) t.sum[i - 1] += double(ts[i] - ts[i - 1]) * 1000.0 / double(freq);
+        for (uint32_t i = 1; i < kStamps; ++i) {
+          // The stamp just before this one in time (an earlier stamp wins a tie).
+          uint64_t prev = ts[0];
+          for (uint32_t j = 0; j < kStamps; ++j)
+            if (j != i && (ts[j] < ts[i] || (ts[j] == ts[i] && j < i)) && ts[j] > prev) prev = ts[j];
+          t.sum[i - 1] += double(ts[i] - prev) * 1000.0 / double(freq);
+        }
         t.sum_total += double(ts[kStamps - 1] - ts[0]) * 1000.0 / double(freq);
         ++t.count;
       }

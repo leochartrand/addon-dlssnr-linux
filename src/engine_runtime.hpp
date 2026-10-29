@@ -17,6 +17,11 @@
 //   engine:     the recorded launches, a UAV barrier after each
 //   engine out: the head -> the answer atlas, blended with the history by the network's own logit;
 //               also the next history                                             (engine_out)
+//
+// Scene context (programs traced with trace.py --export-context / --context): the periphery program copies each
+// bottleneck block's tokens out (C lines), and the crop program's bottleneck attends to those tokens as well as its
+// own (X lines), so the crop sees the whole scene the way the full frame does. The periphery then runs first, and
+// its tokens are copied into the crop's buffers before the crop runs.
 
 #pragma once
 
@@ -80,8 +85,16 @@ struct Launch {
   std::vector<uint8_t> packed;   // CUDA layout (each parameter aligned to its size), filled at load
 };
 
+// A bottleneck block's scene-context tokens (q|k|v, fp16 [T, 3C]) in a program's memory.
+struct Context {
+  uint32_t block = 0, seg = 0;
+  uint64_t off = 0, bytes = 0;
+};
+
 struct Program {
   std::string dir;
+  std::vector<Context> ctx_out;  // tokens this program exports (the periphery)
+  std::vector<Context> ctx_in;   // tokens this program's bottleneck also attends to (the crop)
   std::vector<Kernel> kernels;
   std::vector<uint64_t> seg_size;
   std::vector<std::string> seg_file;
@@ -235,6 +248,10 @@ inline bool ParseOne(Program& p, const std::string& dir, bool* missing) {
     } else if (tag == "M") {
       p.lift.resize(512);
       for (float& v : p.lift) s >> v;
+    } else if (tag == "C" || tag == "X") {
+      Context c;
+      s >> c.block >> c.seg >> c.off >> c.bytes;
+      (tag == "C" ? p.ctx_out : p.ctx_in).push_back(c);
     }
   }
   const uint64_t plane = 4ull * p.field_w * p.field_h;
@@ -293,6 +310,22 @@ inline bool Parse() {
     Fail(g.error);
     return false;
   }
+  // A crop that attends to scene context runs only beside a periphery that exports it, block for block.
+  if (!g.progs[kCrop].ctx_in.empty()) {
+    bool paired = g.count == 2;
+    for (const Context& in : g.progs[kCrop].ctx_in) {
+      bool found = false;
+      for (const Context& out : g.progs[kLow].ctx_out) found |= paired && out.block == in.block && out.bytes == in.bytes;
+      paired &= found;
+    }
+    if (!paired) {
+      g.parse_failed = true;
+      std::snprintf(g.error, sizeof(g.error), "%s needs the scene context of a matching periphery program (%s has none)",
+                    g.names[kCrop].c_str(), g.names[kLow].c_str());
+      Fail(g.error);
+      return false;
+    }
+  }
   for (int r = 0; r < g.count; ++r)
     ngx_probe::Logf("nr-engine: %s program %zu kernels, %zu launches, field %ux%u, blend cap %.4f",
                     r == kCrop ? "crop" : "low", g.progs[r].kernels.size(), g.progs[r].launches.size(),
@@ -300,6 +333,9 @@ inline bool Parse() {
   g.parsed = true;
   return true;
 }
+
+// Whether the crop attends to the periphery's scene context (the periphery must then run first).
+inline bool CropNeedsContext() { return g.parsed && !g.progs[kCrop].ctx_in.empty(); }
 
 // The program that runs a region.
 inline const Program& Prog(uint32_t region) { return g.progs[region < (uint32_t)g.count ? region : kCrop]; }
@@ -789,6 +825,27 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
     cmd->SetComputeRoot32BitConstants(2, kBaseConstants, bc, 0);
     cmd->Dispatch((p.base_w + 7) / 8, (p.base_h + 7) / 8, 1);
     if (stamp != nullptr) stamp(cmd, region, false);
+  }
+  // Scene context: the periphery's tokens of this frame into this program's buffers (when it ran; otherwise the
+  // last ones it left there stand).
+  if (!p.ctx_in.empty() && region == kCrop && g.ran_now[kLow]) {
+    const Program& low = g.progs[kLow];
+    std::vector<ID3D12Resource*> srcs, dsts;
+    auto add = [](std::vector<ID3D12Resource*>& v, ID3D12Resource* r) {
+      for (ID3D12Resource* e : v) if (e == r) return;
+      v.push_back(r);
+    };
+    for (const Context& in : p.ctx_in)
+      for (const Context& out : low.ctx_out)
+        if (out.block == in.block) { add(srcs, low.segs[out.seg]); add(dsts, p.segs[in.seg]); }
+    for (ID3D12Resource* r : srcs) Barrier(cmd, r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    for (ID3D12Resource* r : dsts) Barrier(cmd, r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+    for (const Context& in : p.ctx_in)
+      for (const Context& out : low.ctx_out)
+        if (out.block == in.block)
+          cmd->CopyBufferRegion(p.segs[in.seg], in.off, low.segs[out.seg], out.off, in.bytes);
+    for (ID3D12Resource* r : srcs) Barrier(cmd, r, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    for (ID3D12Resource* r : dsts) Barrier(cmd, r, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   }
   ID3D12Resource* const prev = g.hist[g.flip];
   ID3D12Resource* const next = g.hist[g.flip ^ 1];

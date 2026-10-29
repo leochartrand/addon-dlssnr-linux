@@ -810,9 +810,8 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   diag::Mark(cmd, diag::kSqueeze);
   s.stamped = 0;
   nr_engine::stamp = [](ID3D12GraphicsCommandList* c, uint32_t region, bool net) {
-    // The low region's network ends at the model's own stamp.
-    if (region == nr_engine::kLow && net) return;
-    const diag::Stamp st = region == nr_engine::kCrop ? (net ? diag::kCropNet : diag::kCropBase) : diag::kLowBase;
+    const diag::Stamp st = region == nr_engine::kCrop ? (net ? diag::kCropNet : diag::kCropBase)
+                                                      : (net ? diag::kLowNet : diag::kLowBase);
     diag::Mark(c, st);
     s.stamped |= 1u << st;
   };
@@ -885,10 +884,23 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
     const fov::SplitLayout l = fov::SplitSize(s.frame_w, s.frame_h);
     const int every = fov::settings.global_every < 1 ? 1 : fov::settings.global_every;
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
-    result = call(s.feature, false, 0, 0, l.crop_w, l.crop_h);
-    if (result == 1 && global_fresh && fov::settings.periphery_pass) {
-      if (every > 1) reset = 1;
-      result = call(s.feature2, true, l.low_x, 0, l.low_w, l.low_h);
+    const bool periphery = global_fresh && fov::settings.periphery_pass;
+    const int crop_reset = reset;   // the periphery's own reset (every > 1) must not reach the crop
+    if (use_engine && nr_engine::CropNeedsContext()) {
+      // Scene context: the crop's bottleneck reads the periphery's tokens of this frame, so the periphery runs first.
+      result = 1;
+      if (periphery) {
+        if (every > 1) reset = 1;
+        result = call(s.feature2, true, l.low_x, 0, l.low_w, l.low_h);
+        reset = crop_reset;
+      }
+      if (result == 1) result = call(s.feature, false, 0, 0, l.crop_w, l.crop_h);
+    } else {
+      result = call(s.feature, false, 0, 0, l.crop_w, l.crop_h);
+      if (result == 1 && periphery) {
+        if (every > 1) reset = 1;
+        result = call(s.feature2, true, l.low_x, 0, l.low_w, l.low_h);
+      }
     }
   } else {
     result = call(s.feature, false, 0, 0, s.feature_w, s.feature_h);
@@ -930,7 +942,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   }
   s.fail_streak = 0;
   // The per-region stamps a region that did not run on our engine left out, then the model's end.
-  for (diag::Stamp st : {diag::kCropBase, diag::kCropNet, diag::kLowBase})
+  for (diag::Stamp st : {diag::kCropBase, diag::kCropNet, diag::kLowBase, diag::kLowNet})
     if ((s.stamped & (1u << st)) == 0) diag::Mark(cmd, st);
   diag::Mark(cmd, diag::kModel);
   if (foveated) fov::SplitExpand(cmd, s.output, s.proxy, motion, frame, global_fresh);
