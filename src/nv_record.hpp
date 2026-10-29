@@ -188,8 +188,11 @@ inline std::mutex buffers_m;
 using Gva = D3D12_GPU_VIRTUAL_ADDRESS(STDMETHODCALLTYPE*)(ID3D12Resource*);
 inline Gva real_gva = nullptr;
 
+inline std::atomic<uint32_t> gva_calls{0}, uav_calls{0}, capture_calls{0};
+
 inline D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE HookGva(ID3D12Resource* self) {
   const D3D12_GPU_VIRTUAL_ADDRESS va = real_gva(self);
+  ++gva_calls;
   if (va != 0) {
     const D3D12_RESOURCE_DESC d = self->GetDesc();
     if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
@@ -226,11 +229,13 @@ inline void STDMETHODCALLTYPE HookCreateUav(ID3D12Device* self, ID3D12Resource* 
                                             const D3D12_UNORDERED_ACCESS_VIEW_DESC* desc,
                                             D3D12_CPU_DESCRIPTOR_HANDLE handle) {
   last_uav = res;
+  ++uav_calls;
   real_create_uav(self, res, counter, desc, handle);
 }
 
 inline int32_t __cdecl HookCapture(ID3D12Device* device, UavInfo* info) {
   const int32_t r = real_capture(device, info);
+  ++capture_calls;
   if (r == 0 && info != nullptr && last_uav != nullptr && info->va != 0) {
     const D3D12_RESOURCE_DESC d = last_uav->GetDesc();
     std::lock_guard<std::mutex> g(buffers_m);
@@ -252,9 +257,22 @@ inline int32_t __cdecl HookCapture(ID3D12Device* device, UavInfo* info) {
   return r;
 }
 
+inline void HookAddresses(ID3D12Device* d);
+
 inline void OnInitDevice(reshade::api::device* device) {
   if (real_gva != nullptr || device->get_api() != reshade::api::device_api::d3d12) return;
-  auto* d = reinterpret_cast<ID3D12Device*>(device->get_native());
+  HookAddresses(reinterpret_cast<ID3D12Device*>(device->get_native()));
+}
+
+// Also from the init_swapchain event: ReShade reloads the add-on after the device exists, so init_device may
+// have gone to the instance before.
+inline void OnInitSwapchain(reshade::api::swapchain* swapchain, bool) {
+  reshade::api::device* device = swapchain->get_device();
+  if (real_gva != nullptr || device->get_api() != reshade::api::device_api::d3d12) return;
+  HookAddresses(reinterpret_cast<ID3D12Device*>(device->get_native()));
+}
+
+inline void HookAddresses(ID3D12Device* d) {
   D3D12_HEAP_PROPERTIES hp = {D3D12_HEAP_TYPE_UPLOAD};
   D3D12_RESOURCE_DESC rd = {};
   rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -345,7 +363,9 @@ inline void WriteDumps() {
     }
     d.readback->Release();
   }
-  ngx_probe::Logf("nv-record: %zu buffers dumped", dumps.size());
+  ngx_probe::Logf("nv-record: %zu buffers dumped (calls seen: GetGPUVirtualAddress %u, CreateUAV %u, CaptureUAVInfo %u; "
+                  "%zu buffers known)", dumps.size(), gva_calls.load(), uav_calls.load(), capture_calls.load(),
+                  buffers.size());
   dumps.clear();
 }
 
@@ -490,10 +510,12 @@ inline void Install(const char* game_dir) {
 
 inline void Register() {
   reshade::register_event<reshade::addon_event::init_device>(OnInitDevice);
+  reshade::register_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
 }
 
 inline void Unregister() {
   reshade::unregister_event<reshade::addon_event::init_device>(OnInitDevice);
+  reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
   if (real_gva != nullptr) {
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
