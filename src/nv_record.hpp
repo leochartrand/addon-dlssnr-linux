@@ -153,10 +153,39 @@ inline int32_t __cdecl HookExV2(CreateParams* p) {
   return r;
 }
 
+// ID3D12GraphicsCommandList::ResourceBarrier (vtable slot 26), detoured on the first recorded launch's list: inside
+// an NR evaluate each call is logged as "B <count> <type of each: 0 transition, 1 aliasing, 2 uav>" between the "L"
+// lines -- where NVIDIA's runtime orders its kernels.
+using Barrier = void(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, UINT, const D3D12_RESOURCE_BARRIER*);
+inline Barrier real_barrier = nullptr;
+
+inline void STDMETHODCALLTYPE HookBarrier(ID3D12GraphicsCommandList* self, UINT n, const D3D12_RESOURCE_BARRIER* b) {
+  if (in_nr && b != nullptr) {
+    std::lock_guard<std::mutex> g(m);
+    if (FILE* f = Open("launches.txt", "a")) {
+      std::fprintf(f, "B %u", n);
+      for (UINT i = 0; i < n; ++i) std::fprintf(f, " %d", (int)b[i].Type);
+      std::fputc('\n', f);
+      std::fclose(f);
+    }
+  }
+  real_barrier(self, n, b);
+}
+
+inline void HookBarrierOnce(ID3D12GraphicsCommandList* cmd) {
+  if (real_barrier != nullptr || cmd == nullptr) return;
+  real_barrier = reinterpret_cast<Barrier>((*reinterpret_cast<void***>(cmd))[26]);
+  DetourTransactionBegin();
+  DetourUpdateThread(GetCurrentThread());
+  DetourAttach(reinterpret_cast<PVOID*>(&real_barrier), reinterpret_cast<PVOID>(&HookBarrier));
+  DetourTransactionCommit();
+}
+
 // "L <handle> <gx> <gy> <gz> <bytes> <hex of the parameter block>"
 inline int32_t __cdecl HookLaunch(ID3D12GraphicsCommandList* cmd, void* shader, uint32_t gx, uint32_t gy,
                                   uint32_t gz, const void* params, uint32_t size) {
   if (in_nr) {
+    HookBarrierOnce(cmd);
     std::lock_guard<std::mutex> g(m);
     const auto* pb = static_cast<const uint8_t*>(params);
     building.push_back({shader, gx, gy, gz, std::vector<uint8_t>(pb, pb + (pb != nullptr ? size : 0))});
