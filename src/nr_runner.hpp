@@ -167,6 +167,7 @@ struct State {
   float skin_structure = -1.0f;
   float global_tone = -1.0f;
   float scaling_ratio = 0.0f;
+  bool force_reset = false;   // ForceReset in the live ini: the history reset every frame (tests against single-frame references)
   // Split in two calls: the low-res pass's network (-1 = the same as `preset`). That pass sets the
   // look everywhere, and the Small FP8 network fries at its size while Legacy (1) holds up, so it
   // defaults to Legacy; the full-res crop runs `preset`.
@@ -766,7 +767,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   diag::Mark(cmd, diag::kEncode);
 
   float mv_scale_x = guides.mv_scale_x, mv_scale_y = guides.mv_scale_y;
-  int reset = guides.reset;
+  int reset = guides.reset || s.force_reset ? 1 : 0;   // force_reset: every frame alone (single-frame tests)
   const bool game_reset = reset != 0;
   const bool depth_inverted =
       (s.create_flags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;

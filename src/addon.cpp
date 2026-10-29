@@ -397,6 +397,7 @@ void PollLiveSettings() {
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
   diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
   screenshot_requested = LiveInt(path, "Screenshot", screenshot_requested);
+  s.force_reset = LiveInt(path, "ForceReset", s.force_reset ? 1 : 0) != 0;
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
