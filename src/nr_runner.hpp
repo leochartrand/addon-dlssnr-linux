@@ -1164,6 +1164,8 @@ inline bool CopyInsteadOfDlaa(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Pa
 // mode); valid until RunOnGraded takes them or the next present drops them.
 inline Guides graded_guides;
 inline bool graded_guides_valid = false;
+// After the pass landed on the graded frame (it, UNORDERED_ACCESS, left so): ffx_probe's copy for frame generation.
+inline void (*after_graded)(ID3D12GraphicsCommandList*, ID3D12Resource*) = nullptr;
 
 // Called after every successful game DLSS-SR evaluate, on the game's own command list.
 inline void OnDlssEvaluated(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game_params) {
@@ -1269,6 +1271,7 @@ inline bool RunOnGraded(ID3D12GraphicsCommandList* cmd, ID3D12Resource* scene, D
     Transition(cmd, scene, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     cmd->CopyResource(scene, s.graded_frame);
     Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if (after_graded != nullptr) after_graded(cmd, s.graded_frame);
     Transition(cmd, scene, D3D12_RESOURCE_STATE_COPY_DEST, scene_state);
   } else if (scene_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
     Transition(cmd, scene, D3D12_RESOURCE_STATE_COPY_SOURCE, scene_state);

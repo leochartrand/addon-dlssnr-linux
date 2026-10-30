@@ -21,6 +21,7 @@
 #include <reshade.hpp>
 
 #include "ngx_probe.hpp"
+#include "ffx_probe.hpp"
 #include "ui_probe.hpp"
 #include "vrs.hpp"
 #include "graded_hook.hpp"
@@ -151,6 +152,7 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
                const reshade::api::rect*, const reshade::api::rect*,
                uint32_t, const reshade::api::rect*) {
   ngx_probe::TryInstall();
+  ffx_probe::TryInstall();
 
   // F10 toggles the NR pass, edge-triggered, for instant A/B comparison.
   static bool f10_was_down = false;
@@ -465,6 +467,7 @@ void PollLiveSettings() {
   f.crop_pass = LiveInt(path, "CropPass", f.crop_pass ? 1 : 0) != 0;
   f.crop_on_periphery = LiveInt(path, "CropOnPeriphery", f.crop_on_periphery ? 1 : 0) != 0;
   s.second_pass = LiveInt(path, "SecondPass", s.second_pass ? 1 : 0) != 0;
+  ffx_probe::enabled = LiveInt(path, "FgNrHudless", ffx_probe::enabled.load());
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   LiveString(path, "EngineCrop", s.engine_crop, sizeof(s.engine_crop));
   LiveString(path, "EngineLow", s.engine_low, sizeof(s.engine_low));
@@ -911,6 +914,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       graded_hook::Register();
       ngx_probe::mark = ui_probe::Mark;
       ngx_probe::after_dlss = graded_hook::OnDlssEvaluated;
+      nr_runner::after_graded = ffx_probe::Capture;
       reshade::register_overlay(nullptr, OnDrawOverlay);   // the settings, in this add-on's entry on the Add-ons tab
       ngx_probe::TryInstall();  // in case NGX is already resident
       {
