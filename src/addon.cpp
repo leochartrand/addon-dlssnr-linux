@@ -280,13 +280,13 @@ void LoadSettings() {
   s.max_ratio = Clamp(s.max_ratio, 1.0f, 8.0f);
   s.wp_scale = Clamp(s.wp_scale, 0.1f, 4.0f);
   s.intensity = Clamp(s.intensity, 0.0f, 3.0f);
-  s.local_structure = Clamp(s.local_structure, 0.0f, 4.0f);
-  s.local_tone = Clamp(s.local_tone, 0.0f, 4.0f);
+  s.local_structure = Clamp(s.local_structure, 0.0f, 3.0f);
+  s.local_tone = Clamp(s.local_tone, 0.0f, 3.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
   s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 3.0f);
-  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 4.0f);
-  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 4.0f);
+  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 3.0f);
+  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 3.0f);
   s.split_global_skin = Clamp(s.split_global_skin, -1.0f, 2.0f);
   if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
   if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
@@ -522,13 +522,13 @@ void PollLiveSettings() {
   s.max_ratio = Clamp(s.max_ratio, 1.0f, 8.0f);
   s.wp_scale = Clamp(s.wp_scale, 0.1f, 4.0f);
   s.intensity = Clamp(s.intensity, 0.0f, 3.0f);
-  s.local_structure = Clamp(s.local_structure, 0.0f, 4.0f);
-  s.local_tone = Clamp(s.local_tone, 0.0f, 4.0f);
+  s.local_structure = Clamp(s.local_structure, 0.0f, 3.0f);
+  s.local_tone = Clamp(s.local_tone, 0.0f, 3.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
   s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 3.0f);
-  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 4.0f);
-  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 4.0f);
+  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 3.0f);
+  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 3.0f);
   if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
   if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
   if (f.fovea_debug < 0 || f.fovea_debug > 3) f.fovea_debug = 0;
@@ -714,8 +714,8 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     const bool periphery = two_calls && f.periphery_pass;
     if (periphery) ImGui::SeparatorText("The crop");
     changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 3.0f, "%.2f", 1.0f);
-    changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 4.0f, "%.2f", 1.0f);
-    changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 4.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 3.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 3.0f, "%.2f", 1.0f);
     changed |= SliderWithReset("Skin detail (-1 = structure)", &s.skin_structure, -1.0f, 2.0f, "%.2f", -1.0f);
     if (s.style > 2) s.style = 2;
     changed |= ImGui::Combo("Style", &s.style, "Default (standard)\0Natural\0Cinematic\0");
@@ -724,8 +724,8 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       ImGui::SeparatorText("The periphery");
       bool model = false;
       model |= SliderWithReset("NR intensity##periphery", &s.split_global_intensity, 0.0f, 3.0f, "%.2f", 1.0f);
-      model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 4.0f, "%.2f", 1.0f);
-      model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 4.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 3.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 3.0f, "%.2f", 1.0f);
       model |= SliderWithReset("Skin detail (-1 = structure)##periphery", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
       model |= ImGui::Combo("Style##periphery", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
       model |= ImGui::SliderInt("Preset (NGX only)##periphery", &s.split_global_preset, -1, 7,
@@ -740,7 +740,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       changed |= ImGui::SliderInt("UI correction (-1 default, NGX only)", &s.ui_correction, -1, 1);
       changed |= ImGui::SliderInt("Mask blend mode (-1 default, NGX only)", &s.mask_blend_mode, -1, 3);
       changed |= SliderWithReset("Global tone strength (-1 unset, NGX only)", &s.global_tone, -1.0f, 2.0f, "%.2f", -1.0f);
-      changed |= SliderWithReset("Scaling ratio (0 unset, NGX only)", &s.scaling_ratio, 0.0f, 4.0f, "%.2f", 0.0f);
+      changed |= SliderWithReset("Scaling ratio (0 unset, NGX only)", &s.scaling_ratio, 0.0f, 3.0f, "%.2f", 0.0f);
       ImGui::TreePop();
     }
     if (ImGui::Button("Apply to NGX (rebuild)")) nr_runner::ApplyModelSettings();
