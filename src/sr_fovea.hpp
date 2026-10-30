@@ -3,14 +3,13 @@
 //   SrPreset=<n>     the DLSS preset the game's upscaler is created with (NVSDK_NGX_DLSS_Hint_Render_Preset;
 //                    0 = the game's own); read at the create, so set it before the world loads
 //   SrFovea=1        a second DLSS-SR, created here, on a rectangle around the gaze crop only (SrCropPreset),
-//                    written over the game's upscale
-//   SrFovea=2        the same, and no game upscale: the rest of the frame is a bilinear stretch (sr_upscale)
-//   SrFovea=3        as 2, with a small temporal accumulation before the stretch (SrTaa: this frame's weight, %)
+//                    written over the game's upscale (tried and dropped 2026-10-30: no game upscale outside the
+//                    crop, a bilinear stretch or a small TAA instead -- noise and shimmer everywhere in motion)
 //   SrMargin=<px>    output pixels around the crop the rectangle also covers (default 64)
 //   SrFeather=1      the crop's answer goes to a texture of its own and fades in over the margin (0: written
 //                    straight into the frame, a hard edge)
 //   SrShift=1        when the rectangle moves, its motion vectors are shifted by the move and its DLSS history
-//                    carries over (0: the history starts over on every move); SrShiftSign=-1 flips the shift
+//                    carries over (0: the history starts over on every move)
 //   SrFadeIn=<n>     SrFeather: a pixel of the rectangle that just came into it (no DLSS history yet) fades in
 //                    from the game's upscale over n frames (default 4; 0 = off)
 // The rectangle follows the crop of the frame before (the foveated pass places it later in the frame).
@@ -30,8 +29,6 @@
 #include "../build/shaders/sr_age_dxil.h"
 #include "../build/shaders/sr_blend_dxil.h"
 #include "../build/shaders/sr_mvshift_dxil.h"
-#include "../build/shaders/sr_taa_dxil.h"
-#include "../build/shaders/sr_upscale_dxil.h"
 #include "diag.hpp"
 #include "fov.hpp"
 #include "nr_compose.hpp"
@@ -44,10 +41,8 @@ inline std::atomic<int> preset{0};
 inline std::atomic<int> mode{0};
 inline std::atomic<int> crop_preset{0};
 inline std::atomic<int> margin{64};
-inline std::atomic<int> jitter_sign{-1};
 inline std::atomic<int> shift{1};
 inline std::atomic<int> fade_in{4};
-inline std::atomic<int> shift_sign{1};
 inline std::atomic<int> game_flags{0};   // the game's DLSS-SR create flags, reused for the crop's
 
 using LogfFn = void (*)(const char*, ...);
@@ -81,32 +76,26 @@ inline void OnGameCreate(NVSDK_NGX_Parameter* p, LogfFn logf) {
   if (v > 0) SetPresetHints(p, (unsigned)v);
 }
 
-// --- the periphery without the game's upscale (SrFovea=2: a bilinear stretch; 3: a small TAA, then the stretch)
+// --- the crop's compute passes: one root signature, their pipelines and a ring of descriptors
 
 constexpr uint32_t kRing = 24;   // descriptor sets in flight (a frame takes up to three)
-constexpr uint32_t kPerFrame = 20;  // descriptors per frame: TAA, stretch, blend, MV shift, age (t0-t2 u0 each)
+constexpr uint32_t kPerFrame = 12;  // descriptors per frame: blend, MV shift, age (t0-t2 u0 each)
 
-struct Stretch {
+struct Passes {
   ID3D12RootSignature* root = nullptr;
-  ID3D12PipelineState* pso = nullptr;
-  ID3D12PipelineState* taa_pso = nullptr;
   ID3D12PipelineState* blend_pso = nullptr;
   ID3D12PipelineState* mvshift_pso = nullptr;
   ID3D12PipelineState* age_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t step = 0, frame = 0;
-  ID3D12Resource* hist[2] = {};   // the accumulation, alternating (NON_PIXEL_SHADER_RESOURCE between frames)
-  uint32_t hist_w = 0, hist_h = 0, flip = 0;
-  bool hist_valid = false;
   bool failed = false;
 };
-inline Stretch st;
-inline std::atomic<int> taa_percent{10};
-inline std::atomic<int> feather{1};   // SrTaa: this frame's weight in the accumulation, in percent
+inline Passes st;
+inline std::atomic<int> feather{1};
 
 // [0] SRV table t0-t2, [1] UAV table u0, [2] eight constants b0.
-inline bool StretchInit(ID3D12Device* device) {
-  if (st.pso != nullptr) return true;
+inline bool PassesInit(ID3D12Device* device) {
+  if (st.blend_pso != nullptr) return true;
   if (st.failed) return false;
   st.failed = true;
   D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0, 0};
@@ -131,10 +120,6 @@ inline bool StretchInit(ID3D12Device* device) {
   if (FAILED(hr)) return false;
   D3D12_COMPUTE_PIPELINE_STATE_DESC pso = {};
   pso.pRootSignature = st.root;
-  pso.CS = {sr_upscale_dxil, sizeof(sr_upscale_dxil)};
-  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.pso)))) return false;
-  pso.CS = {sr_taa_dxil, sizeof(sr_taa_dxil)};
-  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.taa_pso)))) return false;
   pso.CS = {sr_blend_dxil, sizeof(sr_blend_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.blend_pso)))) return false;
   pso.CS = {sr_mvshift_dxil, sizeof(sr_mvshift_dxil)};
@@ -147,126 +132,6 @@ inline bool StretchInit(ID3D12Device* device) {
   st.step = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
   st.failed = false;
   return true;
-}
-
-inline bool EnsureHistory(ID3D12Device* device, const D3D12_RESOURCE_DESC& color) {
-  if (st.hist[0] != nullptr && st.hist_w == color.Width && st.hist_h == color.Height) return true;
-  for (auto*& h : st.hist)
-    if (h != nullptr) h->Release(), h = nullptr;
-  D3D12_HEAP_PROPERTIES heap = {};
-  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-  D3D12_RESOURCE_DESC d = {};
-  d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  d.Width = color.Width;
-  d.Height = color.Height;
-  d.DepthOrArraySize = 1;
-  d.MipLevels = 1;
-  d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-  d.SampleDesc.Count = 1;
-  d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-  for (auto*& h : st.hist)
-    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d,
-                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
-                                               IID_PPV_ARGS(&h))))
-      return false;
-  st.hist_w = (uint32_t)color.Width;
-  st.hist_h = color.Height;
-  st.hist_valid = false;
-  return true;
-}
-
-// The game's Color (NON_PIXEL_SHADER_RESOURCE) into its Output (UNORDERED_ACCESS), both left in their states:
-// stretched as it is (taa false), or accumulated first. `game` gives the motion vectors, jitter and reset.
-inline bool StretchRecord(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game, bool taa) {
-  ID3D12Resource *color = nullptr, *output = nullptr, *motion = nullptr;
-  float jx = 0.0f, jy = 0.0f, mvx = 1.0f, mvy = 1.0f;
-  int reset = 0;
-  game->Get(NVSDK_NGX_Parameter_Color, &color);
-  game->Get(NVSDK_NGX_Parameter_Output, &output);
-  game->Get(NVSDK_NGX_Parameter_MotionVectors, &motion);
-  game->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &jx);
-  game->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jy);
-  game->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvx);
-  game->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvy);
-  game->Get(NVSDK_NGX_Parameter_Reset, &reset);
-  if (color == nullptr || output == nullptr || (taa && motion == nullptr)) return false;
-  ID3D12Device* device = nullptr;
-  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
-  const D3D12_RESOURCE_DESC cd = color->GetDesc(), od = output->GetDesc();
-  bool ok = StretchInit(device) && (!taa || EnsureHistory(device, cd));
-  if (ok) {
-    const uint32_t base = (st.frame++ % kRing) * kPerFrame;
-    D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
-    auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
-    auto at_gpu = [&](uint32_t i) { return D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + UINT64(base + i) * st.step}; };
-    auto srv = [&](ID3D12Resource* r, DXGI_FORMAT f, uint32_t i) {
-      D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
-      v.Format = f;
-      v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-      v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-      v.Texture2D.MipLevels = 1;
-      device->CreateShaderResourceView(r, &v, at_cpu(i));
-    };
-    auto uav = [&](ID3D12Resource* r, DXGI_FORMAT f, uint32_t i) {
-      D3D12_UNORDERED_ACCESS_VIEW_DESC v = {};
-      v.Format = f;
-      v.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-      device->CreateUnorderedAccessView(r, nullptr, &v, at_cpu(i));
-    };
-    auto bits = [](float f) { return *reinterpret_cast<const uint32_t*>(&f); };
-    auto transition = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
-      D3D12_RESOURCE_BARRIER b = {};
-      b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-      b.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, from, to};
-      cmd->ResourceBarrier(1, &b);
-    };
-    ID3D12DescriptorHeap* heaps[] = {st.heap};
-    cmd->SetDescriptorHeaps(1, heaps);
-    cmd->SetComputeRootSignature(st.root);
-
-    ID3D12Resource* source = color;
-    DXGI_FORMAT source_format = cd.Format;
-    float sx = jx * (float)jitter_sign.load(), sy = jy * (float)jitter_sign.load();
-    if (taa) {
-      ID3D12Resource* prev = st.hist[st.flip];
-      ID3D12Resource* next = st.hist[st.flip ^ 1];
-      st.flip ^= 1;
-      srv(color, cd.Format, 0);
-      srv(prev, DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
-      srv(motion, motion->GetDesc().Format, 2);
-      uav(next, DXGI_FORMAT_R16G16B16A16_FLOAT, 3);
-      const float w = (reset != 0 || !st.hist_valid) ? 1.0f : (float)taa_percent.load() / 100.0f;
-      st.hist_valid = true;
-      const uint32_t c[8] = {(uint32_t)cd.Width, cd.Height, bits(mvx), bits(mvy), bits(w), 0, 0, 0};
-      transition(next, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      cmd->SetPipelineState(st.taa_pso);
-      cmd->SetComputeRootDescriptorTable(0, at_gpu(0));
-      cmd->SetComputeRootDescriptorTable(1, at_gpu(3));
-      cmd->SetComputeRoot32BitConstants(2, 8, c, 0);
-      cmd->Dispatch(((uint32_t)cd.Width + 15) / 16, (cd.Height + 15) / 16, 1);
-      transition(next, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-      source = next;
-      source_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-      sx = sy = 0.0f;   // the accumulation has no jitter of its own
-    }
-    srv(source, source_format, 4);
-    srv(source, source_format, 5);
-    srv(source, source_format, 6);
-    uav(output, od.Format, 7);
-    const uint32_t c[8] = {(uint32_t)cd.Width, cd.Height, (uint32_t)od.Width, od.Height, bits(sx), bits(sy), 0, 0};
-    cmd->SetPipelineState(st.pso);
-    cmd->SetComputeRootDescriptorTable(0, at_gpu(4));
-    cmd->SetComputeRootDescriptorTable(1, at_gpu(7));
-    cmd->SetComputeRoot32BitConstants(2, 8, c, 0);
-    cmd->Dispatch(((uint32_t)od.Width + 15) / 16, (od.Height + 15) / 16, 1);
-    D3D12_RESOURCE_BARRIER b = {};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    b.UAV.pResource = output;
-    cmd->ResourceBarrier(1, &b);
-  }
-  device->Release();
-  return ok;
 }
 
 // --- the crop's own DLSS-SR ---------------------------------------------------
@@ -357,7 +222,7 @@ inline ID3D12Resource* Age(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
   ID3D12Resource* old = cr.age[cr.age_flip];
   ID3D12Resource* now = cr.age[cr.age_flip ^ 1];
   cr.age_flip ^= 1;
-  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 16;
+  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 8;
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
   auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
@@ -412,7 +277,7 @@ inline bool EnsureMotion(ID3D12Device* device) {
 // The game's motion vectors (NON_PIXEL_SHADER_RESOURCE, left so) at rx,ry into the crop's own, plus add_x,add_y.
 inline void ShiftMotion(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* motion, uint32_t rx,
                         uint32_t ry, float add_x, float add_y) {
-  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 12;
+  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 4;
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
   auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
@@ -449,7 +314,7 @@ inline void ShiftMotion(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID
 // The crop's answer (UNORDERED_ACCESS, left so) faded into the frame (UNORDERED_ACCESS) at bx,by over `fade` px.
 inline void Blend(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* frame, DXGI_FORMAT format,
                   uint32_t bx, uint32_t by, uint32_t fade, ID3D12Resource* age, float frames) {
-  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 8;
+  const uint32_t base = ((st.frame++) % kRing) * kPerFrame;
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
   auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
@@ -614,13 +479,12 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
   float mv_x = 1.0f, mv_y = 1.0f;
   game->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mv_x);
   game->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mv_y);
-  const bool shifted = shift.load() != 0 && !first && mv_x != 0.0f && mv_y != 0.0f && StretchInit(device) &&
+  const bool shifted = shift.load() != 0 && !first && mv_x != 0.0f && mv_y != 0.0f && PassesInit(device) &&
                        EnsureMotion(device);
   const bool fresh = reset != 0 || first || (moved && !shifted);
   p->Set(NVSDK_NGX_Parameter_Reset, fresh ? 1 : 0);
   if (shifted) {
-    const float sgn = shift_sign.load() < 0 ? -1.0f : 1.0f;
-    ShiftMotion(cmd, device, motion, rx, ry, sgn * (float)dx / mv_x, sgn * (float)dy / mv_y);
+    ShiftMotion(cmd, device, motion, rx, ry, (float)dx / mv_x, (float)dy / mv_y);
     p->Set(NVSDK_NGX_Parameter_MotionVectors, cr.motion);
   }
   p->Set(NVSDK_NGX_Parameter_DLSS_Input_Color_Subrect_Base_X, rx);
@@ -634,7 +498,7 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
   p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, cr.in_w);
   p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, cr.in_h);
 
-  const bool blend = feather.load() != 0 && StretchInit(device) && EnsureAnswer(device, od.Format) &&
+  const bool blend = feather.load() != 0 && PassesInit(device) && EnsureAnswer(device, od.Format) &&
                      EnsureAge(device);
   if (blend) {   // the answer at the origin of a texture of its own; blended into the frame below
     p->Set(NVSDK_NGX_Parameter_Output, cr.answer);
@@ -659,8 +523,8 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
          fresh ? "reset" : moved ? "moved, history shifted" : "held", blend ? "feathered" : "hard edge", mv_x, mv_y,
          (unsigned)res);
   if (cr.evals % 600 == 0) {
-    logf("sr-fovea: last 600 crop evaluates: %u history resets, %u moves carried over (SrShift %d, sign %d)",
-         cr.resets, cr.shifts, shift.load(), shift_sign.load());
+    logf("sr-fovea: last 600 crop evaluates: %u history resets, %u moves carried over (SrShift %d)", cr.resets,
+         cr.shifts, shift.load());
     cr.resets = cr.shifts = 0;
   }
 }
