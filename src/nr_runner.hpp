@@ -210,6 +210,7 @@ struct State {
   // frame). Off: the pass runs inside the DLSS evaluate, on its HDR output (or input, before_upscale),
   // through the colour bridge.
   bool graded = true;
+  bool second_pass = false;   // "deep fried": the whole pass again on its own answer (graded mode), own history
   ID3D12Resource* graded_frame = nullptr;   // our UAV copy of the graded frame, processed and copied back
   unsigned frame_w = 0, frame_h = 0;
   unsigned tex_w = 0, tex_h = 0;
@@ -1249,7 +1250,19 @@ inline bool RunOnGraded(ID3D12GraphicsCommandList* cmd, ID3D12Resource* scene, D
   cmd->CopyResource(s.graded_frame, scene);
   Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-  const bool landed = Evaluate(cmd, guides, s.graded_frame, true);   // graded_frame is UAV again
+  bool landed = Evaluate(cmd, guides, s.graded_frame, true);   // graded_frame is UAV again
+  if (landed && s.second_pass) {
+    // Deep fried: the answer through the model again, with a history of its own for each of the two passes.
+    ID3D12Device* device = nullptr;
+    if (SUCCEEDED(cmd->GetDevice(IID_PPV_ARGS(&device))) && device != nullptr) {
+      nr_engine::SwapHistory(nr_engine::second);
+      fov::SwapTone(device);
+      Evaluate(cmd, guides, s.graded_frame, true);
+      fov::SwapTone(device);
+      nr_engine::SwapHistory(nr_engine::second);
+      device->Release();
+    }
+  }
 
   if (landed) {
     Transition(cmd, s.graded_frame, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);

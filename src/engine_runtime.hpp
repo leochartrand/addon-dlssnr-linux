@@ -29,6 +29,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <utility>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -168,6 +169,24 @@ struct State {
 };
 
 inline State g;
+
+// A second set of the per-frame history (the answers of the last frame and their bookkeeping), for a second pass
+// in the same frame (the "deep fried" pass): swapped in around its runs so each pass keeps its own temporal loop.
+struct HistorySet {
+  ID3D12Resource* hist[2] = {};
+  uint32_t flip = 0;
+  bool ran_last[kRegions] = {};
+  uint32_t age[kRegions] = {};
+  uint32_t rect[kRegions][4] = {};
+};
+inline HistorySet second;
+inline void SwapHistory(HistorySet& o) {
+  std::swap(g.hist, o.hist);
+  std::swap(g.flip, o.flip);
+  std::swap(g.ran_last, o.ran_last);
+  std::swap(g.age, o.age);
+  std::swap(g.rect, o.rect);
+}
 
 inline void Fail(const char* what, long code = 0) {
   std::snprintf(g.error, sizeof(g.error), code != 0 ? "%s (0x%lx)" : "%s", what, (unsigned long)code);

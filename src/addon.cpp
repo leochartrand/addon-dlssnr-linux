@@ -247,6 +247,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::get_config_value(nullptr, kConfigSection, "CropPass", f.crop_pass);
   reshade::get_config_value(nullptr, kConfigSection, "CropOnPeriphery", f.crop_on_periphery);
+  reshade::get_config_value(nullptr, kConfigSection, "SecondPass", s.second_pass);
   {
     int v[5] = {sr_fovea::preset, sr_fovea::mode, sr_fovea::crop_preset, sr_fovea::shift, sr_fovea::fade_in};
     reshade::get_config_value(nullptr, kConfigSection, "SrPreset", v[0]);
@@ -353,6 +354,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::set_config_value(nullptr, kConfigSection, "CropPass", f.crop_pass);
   reshade::set_config_value(nullptr, kConfigSection, "CropOnPeriphery", f.crop_on_periphery);
+  reshade::set_config_value(nullptr, kConfigSection, "SecondPass", s.second_pass);
   reshade::set_config_value(nullptr, kConfigSection, "SrPreset", sr_fovea::preset.load());
   reshade::set_config_value(nullptr, kConfigSection, "SrFovea", sr_fovea::mode.load());
   reshade::set_config_value(nullptr, kConfigSection, "SrCropPreset", sr_fovea::crop_preset.load());
@@ -462,6 +464,7 @@ void PollLiveSettings() {
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   f.crop_pass = LiveInt(path, "CropPass", f.crop_pass ? 1 : 0) != 0;
   f.crop_on_periphery = LiveInt(path, "CropOnPeriphery", f.crop_on_periphery ? 1 : 0) != 0;
+  s.second_pass = LiveInt(path, "SecondPass", s.second_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   LiveString(path, "EngineCrop", s.engine_crop, sizeof(s.engine_crop));
   LiveString(path, "EngineLow", s.engine_low, sizeof(s.engine_low));
@@ -688,6 +691,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     s.graded = where == 0;
     s.before_upscale = where == 2;
     changed |= SliderWithReset("Model's share of the picture", &s.transfer, 0.0f, 3.0f, "%.2f", 1.0f);
+    if (s.graded)
+      changed |= ImGui::Checkbox("Deep fried: a second pass on the first's answer (the model's cost twice)",
+                                 &s.second_pass);
     if (!s.graded) {
       ImGui::SeparatorText("Colour bridge (HDR frames only)");
       changed |= SliderWithReset("Colour strength", &s.colour_strength, 0.0f, 1.0f, "%.2f", 0.0f);
@@ -706,21 +712,6 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     // testing via OptiScaler_DLSSNR). With two calls, each region has its own set, side by side. Our engine
     // reads these live; NGX only at a rebuild (Apply).
     const bool periphery = two_calls && f.periphery_pass;
-    // Past 1 the controls leave what the model was trained on: intensity extrapolates the answer away from the
-    // frame, tone and structure push its conditioning. For screenshots and photo mode, not play.
-    auto strengths = [&](float intensity, float tone, float structure, float share) {
-      s.intensity = s.split_global_intensity = intensity;
-      s.local_tone = s.split_global_tone = tone;
-      s.local_structure = s.split_global_structure = structure;
-      s.transfer = share;
-      nr_runner::ApplyModelSettings();
-      changed = true;
-    };
-    if (ImGui::Button("Deep fried")) strengths(1.5f, 2.5f, 2.5f, 1.5f);
-    ImGui::SameLine();
-    if (ImGui::Button("Normal")) strengths(1.0f, 1.0f, 1.0f, 1.0f);
-    ImGui::SameLine();
-    ImGui::TextDisabled("both regions; past 1 is outside what the model was trained on");
     if (periphery) ImGui::SeparatorText("The crop");
     changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 3.0f, "%.2f", 1.0f);
     changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 4.0f, "%.2f", 1.0f);
