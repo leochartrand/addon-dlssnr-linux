@@ -751,6 +751,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
   wp = (wp < 0.01f ? 0.01f : (wp > 1000.0f ? 1000.0f : wp)) * s.wp_scale;
 
   if (poll_live != nullptr) poll_live();
+  nr_engine::TickGraves();
   diag::Poll(s.eval_count, s.game_dir, ngx_probe::Log);
   diag::Begin(cmd, s.eval_count, ngx_probe::Log);
 

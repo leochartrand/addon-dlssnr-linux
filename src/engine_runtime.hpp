@@ -732,6 +732,9 @@ inline void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* r, D3D12_RES
 }
 
 // Textures the GPU may still be using wait out the descriptor ring before they are released.
+// Called once per pass by the runner, whatever the engine's state: retired programs must go while their
+// replacement loads (the engine does not run then), or both sit in VRAM together -- 2.2 GiB of whole-frame
+// program next to the foveated ones overflowed the 3080 and paged the game down to a few frames per second.
 inline void TickGraves() {
   for (size_t i = 0; i < g.graves.size();) {
     if (--g.graves[i].frames > 0) { ++i; continue; }
@@ -817,7 +820,6 @@ inline bool BeginFrame(ID3D12GraphicsCommandList* cmd, ID3D12Resource* atlas, bo
   if (g.status.load() != kReady) return false;
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
-  TickGraves();
   const D3D12_RESOURCE_DESC d = atlas->GetDesc();
   const bool ok = EnsureHistory(device, (uint32_t)d.Width, d.Height);
   device->Release();
