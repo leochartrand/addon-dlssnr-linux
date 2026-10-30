@@ -36,9 +36,10 @@ inline PfnFfxDispatch real_dispatch = nullptr;
 // NON_PIXEL_SHADER_RESOURCE), taken by the next frame generation configure.
 inline ID3D12Resource* hudless = nullptr;
 inline std::atomic<bool> fresh{false};   // written this frame, not yet handed over
-inline std::atomic<bool> wanted{false};  // the game configures frame generation with a HUD-less image
+inline std::atomic<bool> wanted{false};  // the game has configured frame generation with a HUD-less image
 inline DXGI_FORMAT game_format = DXGI_FORMAT_UNKNOWN;   // the game's HUD-less image's
 inline uint32_t swapped = 0, kept = 0, configures = 0;
+inline std::atomic<uint32_t> captures{0};   // NR images written (Capture), for the trace
 
 // The same pixels, typed or not (the game may hand frame generation a typeless image).
 inline DXGI_FORMAT Family(DXGI_FORMAT f) {
@@ -113,11 +114,22 @@ inline ffxReturnCode_t HookConfigure(ffxContext* context, const ffxConfigureDesc
                     d.HUDLessColor.description.format, d.HUDLessColor.description.width,
                     d.HUDLessColor.description.height, d.HUDLessColor.state, d.flags,
                     (unsigned long long)d.frameID);
-  if (game != nullptr) {
+  // A trace of 16 consecutive configures every 600: what the game asks for, frame by frame, and how many NR
+  // images were written since the configure before (1 each: in step; 0 or 2: the image is a frame off).
+  {
+    static uint32_t last_captures = 0;
+    const uint32_t c = captures.load();
+    if (configures % 600 < 16)
+      ngx_probe::Logf("ffx-probe: trace %u: enabled %d HUD-less %p frame %llu flags 0x%x; NR images since last %u, "
+                      "fresh %d", configures % 600, d.frameGenerationEnabled ? 1 : 0, (void*)game,
+                      (unsigned long long)d.frameID, d.flags, c - last_captures, fresh.load() ? 1 : 0);
+    last_captures = c;
+  }
+  // Sticky: with ray tracing on the game hands a HUD-less image to only some of its configures, and a capture
+  // skipped after one without would leave the next with the game's own (pre-NR) image -- a flicker.
+  if (game != nullptr && d.frameGenerationEnabled) {
     game_format = game->GetDesc().Format;
-    wanted = d.frameGenerationEnabled;
-  } else {
-    wanted = false;
+    wanted = true;
   }
   bool swap = enabled.load() != 0 && game != nullptr && d.frameGenerationEnabled && hudless != nullptr &&
               fresh.exchange(false);
@@ -220,6 +232,7 @@ inline void Capture(ID3D12GraphicsCommandList* cmd, ID3D12Resource* answer) {
   for (auto& t : b) std::swap(t.Transition.StateBefore, t.Transition.StateAfter);
   cmd->ResourceBarrier(2, b);
   fresh = true;
+  ++captures;
 }
 
 }  // namespace ffx_probe
