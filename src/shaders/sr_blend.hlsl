@@ -1,7 +1,8 @@
 // Foveated super resolution: the crop's own DLSS-SR answer (its rectangle) blended into the frame, fully inside
-// and fading out over the margin at its edges, so the two upscales meet without a seam.
+// and fading out over the margin at its edges, so the two upscales meet without a seam; a pixel with only a few
+// frames of history (sr_age) fades in from the game's upscale over g_fade_in frames.
 Texture2D<float4> Crop : register(t0);
-Texture2D<float4> Unused1 : register(t1);
+Texture2D<float> Age : register(t1);
 Texture2D<float4> Unused2 : register(t2);
 RWTexture2D<float4> Frame : register(u0);
 
@@ -12,7 +13,7 @@ cbuffer Constants : register(b0)
     uint g_w;        // its size
     uint g_h;
     float g_feather; // output pixels over which it fades in from each edge
-    uint g_pad0;
+    float g_fade_in; // frames of history before a pixel is fully the crop's (0: no fade-in)
     uint g_pad1;
     uint g_pad2;
 };
@@ -24,7 +25,9 @@ void main(uint3 id : SV_DispatchThreadID)
         return;
     const float2 p = float2(id.xy) + 0.5;
     const float edge = min(min(p.x, g_w - p.x), min(p.y, g_h - p.y));
-    const float w = g_feather > 0.0 ? smoothstep(0.0, 1.0, saturate(edge / g_feather)) : 1.0;
+    float w = g_feather > 0.0 ? smoothstep(0.0, 1.0, saturate(edge / g_feather)) : 1.0;
+    if (g_fade_in > 0.0)
+        w *= smoothstep(0.0, 1.0, saturate(Age[id.xy] / g_fade_in));
     const uint2 at = uint2(g_base_x, g_base_y) + id.xy;
     Frame[at] = lerp(Frame[at], Crop[id.xy], w);
 }

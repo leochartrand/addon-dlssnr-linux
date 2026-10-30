@@ -11,6 +11,8 @@
 //                    straight into the frame, a hard edge)
 //   SrShift=1        when the rectangle moves, its motion vectors are shifted by the move and its DLSS history
 //                    carries over (0: the history starts over on every move); SrShiftSign=-1 flips the shift
+//   SrFadeIn=<n>     SrFeather: a pixel of the rectangle that just came into it (no DLSS history yet) fades in
+//                    from the game's upscale over n frames (default 4; 0 = off)
 // The rectangle follows the crop of the frame before (the foveated pass places it later in the frame).
 #pragma once
 
@@ -25,6 +27,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs.h>
 
+#include "../build/shaders/sr_age_dxil.h"
 #include "../build/shaders/sr_blend_dxil.h"
 #include "../build/shaders/sr_mvshift_dxil.h"
 #include "../build/shaders/sr_taa_dxil.h"
@@ -43,6 +46,7 @@ inline std::atomic<int> crop_preset{0};
 inline std::atomic<int> margin{64};
 inline std::atomic<int> jitter_sign{-1};
 inline std::atomic<int> shift{1};
+inline std::atomic<int> fade_in{4};
 inline std::atomic<int> shift_sign{1};
 inline std::atomic<int> game_flags{0};   // the game's DLSS-SR create flags, reused for the crop's
 
@@ -79,7 +83,7 @@ inline void OnGameCreate(NVSDK_NGX_Parameter* p, LogfFn logf) {
 // --- the periphery without the game's upscale (SrFovea=2: a bilinear stretch; 3: a small TAA, then the stretch)
 
 constexpr uint32_t kRing = 24;   // descriptor sets in flight (a frame takes up to three)
-constexpr uint32_t kPerFrame = 16;  // descriptors per frame: TAA, stretch, blend, MV shift (t0-t2 u0 each)
+constexpr uint32_t kPerFrame = 20;  // descriptors per frame: TAA, stretch, blend, MV shift, age (t0-t2 u0 each)
 
 struct Stretch {
   ID3D12RootSignature* root = nullptr;
@@ -87,6 +91,7 @@ struct Stretch {
   ID3D12PipelineState* taa_pso = nullptr;
   ID3D12PipelineState* blend_pso = nullptr;
   ID3D12PipelineState* mvshift_pso = nullptr;
+  ID3D12PipelineState* age_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t step = 0, frame = 0;
   ID3D12Resource* hist[2] = {};   // the accumulation, alternating (NON_PIXEL_SHADER_RESOURCE between frames)
@@ -133,6 +138,8 @@ inline bool StretchInit(ID3D12Device* device) {
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.blend_pso)))) return false;
   pso.CS = {sr_mvshift_dxil, sizeof(sr_mvshift_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.mvshift_pso)))) return false;
+  pso.CS = {sr_age_dxil, sizeof(sr_age_dxil)};
+  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.age_pso)))) return false;
   D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRing * kPerFrame,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&st.heap)))) return false;
@@ -269,6 +276,8 @@ struct Crop {
   uint32_t out_w = 0, out_h = 0, in_w = 0, in_h = 0, ratio = 0;
   int base_x = -1, base_y = -1;     // the rectangle's output origin last frame
   ID3D12Resource* answer = nullptr; // SrFeather: the crop's answer (UNORDERED_ACCESS between frames)
+  ID3D12Resource* age[2] = {};      // SrFadeIn: frames of history per pixel, alternating (NON_PIXEL_SHADER_RESOURCE)
+  uint32_t age_flip = 0;
   ID3D12Resource* motion = nullptr; // SrShift: its motion vectors, shifted (NON_PIXEL_SHADER_RESOURCE between frames)
   uint32_t resets = 0, shifts = 0, evals = 0;
   bool failed = false;
@@ -315,6 +324,67 @@ inline DXGI_FORMAT Typed(DXGI_FORMAT f) {
     case DXGI_FORMAT_R32G32B32A32_TYPELESS: return DXGI_FORMAT_R32G32B32A32_FLOAT;
     default: return f;
   }
+}
+
+inline bool EnsureAge(ID3D12Device* device) {
+  if (cr.age[0] != nullptr) return true;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  D3D12_RESOURCE_DESC d = {};
+  d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  d.Width = cr.out_w;
+  d.Height = cr.out_h;
+  d.DepthOrArraySize = 1;
+  d.MipLevels = 1;
+  d.Format = DXGI_FORMAT_R32_FLOAT;
+  d.SampleDesc.Count = 1;
+  d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  for (auto*& a : cr.age)
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                               IID_PPV_ARGS(&a))))
+      return false;
+  return true;
+}
+
+// This frame's ages from last frame's, the rectangle having moved by dx,dy output pixels (reset: all 0). Returns
+// the texture with this frame's (NON_PIXEL_SHADER_RESOURCE).
+inline ID3D12Resource* Age(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, int dx, int dy, bool reset) {
+  ID3D12Resource* old = cr.age[cr.age_flip];
+  ID3D12Resource* now = cr.age[cr.age_flip ^ 1];
+  cr.age_flip ^= 1;
+  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 16;
+  D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
+  D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
+  auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
+  auto at_gpu = [&](uint32_t i) { return D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + UINT64(base + i) * st.step}; };
+  D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+  v.Format = DXGI_FORMAT_R32_FLOAT;
+  v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  v.Texture2D.MipLevels = 1;
+  for (uint32_t i = 0; i < 3; ++i) device->CreateShaderResourceView(old, &v, at_cpu(i));
+  D3D12_UNORDERED_ACCESS_VIEW_DESC u = {};
+  u.Format = DXGI_FORMAT_R32_FLOAT;
+  u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+  device->CreateUnorderedAccessView(now, nullptr, &u, at_cpu(3));
+  D3D12_RESOURCE_BARRIER b = {};
+  b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  b.Transition = {now, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+  cmd->ResourceBarrier(1, &b);
+  const uint32_t c[8] = {cr.out_w, cr.out_h, (uint32_t)dx, (uint32_t)dy, reset ? 1u : 0u, 0, 0, 0};
+  ID3D12DescriptorHeap* heaps[] = {st.heap};
+  cmd->SetDescriptorHeaps(1, heaps);
+  cmd->SetComputeRootSignature(st.root);
+  cmd->SetPipelineState(st.age_pso);
+  cmd->SetComputeRootDescriptorTable(0, at_gpu(0));
+  cmd->SetComputeRootDescriptorTable(1, at_gpu(3));
+  cmd->SetComputeRoot32BitConstants(2, 8, c, 0);
+  cmd->Dispatch((cr.out_w + 15) / 16, (cr.out_h + 15) / 16, 1);
+  std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+  cmd->ResourceBarrier(1, &b);
+  return now;
 }
 
 inline bool EnsureMotion(ID3D12Device* device) {
@@ -374,7 +444,7 @@ inline void ShiftMotion(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID
 
 // The crop's answer (UNORDERED_ACCESS, left so) faded into the frame (UNORDERED_ACCESS) at bx,by over `fade` px.
 inline void Blend(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* frame, DXGI_FORMAT format,
-                  uint32_t bx, uint32_t by, uint32_t fade) {
+                  uint32_t bx, uint32_t by, uint32_t fade, ID3D12Resource* age, float frames) {
   const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 8;
   D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
   D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
@@ -385,7 +455,11 @@ inline void Blend(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Re
   v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
   v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   v.Texture2D.MipLevels = 1;
-  for (uint32_t i = 0; i < 3; ++i) device->CreateShaderResourceView(cr.answer, &v, at_cpu(i));
+  device->CreateShaderResourceView(cr.answer, &v, at_cpu(0));
+  device->CreateShaderResourceView(cr.answer, &v, at_cpu(2));
+  D3D12_SHADER_RESOURCE_VIEW_DESC a = v;
+  a.Format = DXGI_FORMAT_R32_FLOAT;
+  device->CreateShaderResourceView(age, &a, at_cpu(1));   // never null: Blend runs only with the ages there
   D3D12_UNORDERED_ACCESS_VIEW_DESC u = {};
   u.Format = format;
   u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -396,7 +470,8 @@ inline void Blend(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Re
                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
   cmd->ResourceBarrier(1, &b);
   const float f = (float)fade;
-  const uint32_t c[8] = {bx, by, cr.out_w, cr.out_h, *reinterpret_cast<const uint32_t*>(&f), 0, 0, 0};
+  const uint32_t c[8] = {bx, by, cr.out_w, cr.out_h, *reinterpret_cast<const uint32_t*>(&f),
+                         *reinterpret_cast<const uint32_t*>(&frames), 0, 0};
   ID3D12DescriptorHeap* heaps[] = {st.heap};
   cmd->SetDescriptorHeaps(1, heaps);
   cmd->SetComputeRootSignature(st.root);
@@ -544,7 +619,8 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
   p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, cr.in_w);
   p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, cr.in_h);
 
-  const bool blend = feather.load() != 0 && StretchInit(device) && EnsureAnswer(device, od.Format);
+  const bool blend = feather.load() != 0 && StretchInit(device) && EnsureAnswer(device, od.Format) &&
+                     EnsureAge(device);
   if (blend) {   // the answer at the origin of a texture of its own; blended into the frame below
     p->Set(NVSDK_NGX_Parameter_Output, cr.answer);
     p->Set(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, 0u);
@@ -553,7 +629,11 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
 
   diag::SpanStart(crop_span, cmd, ngx_probe::Log);
   const NVSDK_NGX_Result res = evaluate(cmd, cr.handle, p, nullptr);
-  if (blend && res == NVSDK_NGX_Result_Success) Blend(cmd, device, output, od.Format, bx, by, m);
+  if (blend && res == NVSDK_NGX_Result_Success) {
+    ID3D12Resource* age = Age(cmd, device, dx * (int)r, dy * (int)r, fresh);
+    const int n = fade_in.load();
+    Blend(cmd, device, output, od.Format, bx, by, m, age, (float)(n < 0 ? 0 : n));
+  }
   diag::SpanStop(crop_span, cmd);
   device->Release();
   ++cr.evals;
