@@ -368,6 +368,7 @@ void PollLiveSettings() {
   sr_fovea::margin = LiveInt(path, "SrMargin", 64);
   sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
   sr_fovea::taa_percent = LiveInt(path, "SrTaa", 10);
+  sr_fovea::feather = LiveInt(path, "SrFeather", 1);
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
