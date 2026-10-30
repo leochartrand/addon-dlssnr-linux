@@ -852,7 +852,8 @@ inline bool Run(ID3D12GraphicsCommandList* cmd, uint32_t region, ID3D12Resource*
   std::memcpy(&c[9], &blend, 4);
   const float motion_scale = valid ? (float)g.age[region] : 1.0f;
   std::memcpy(&c[10], &motion_scale, 4);
-  const float intensity = ctl.intensity < 0.0f ? 0.0f : (ctl.intensity > 1.0f ? 1.0f : ctl.intensity);
+  // Past 1 the answer is extrapolated away from the frame (the overlay's "deep fried" range).
+  const float intensity = ctl.intensity < 0.0f ? 0.0f : (ctl.intensity > 3.0f ? 3.0f : ctl.intensity);
   std::memcpy(&c[11], &intensity, 4);
 
   // The input block: this frame's noise and the region's controls (Controls.conditioning()).
