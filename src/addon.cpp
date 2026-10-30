@@ -22,6 +22,7 @@
 
 #include "ngx_probe.hpp"
 #include "ui_probe.hpp"
+#include "vrs.hpp"
 #include "graded_hook.hpp"
 
 namespace {
@@ -58,6 +59,7 @@ void OnInitSwapchain(reshade::api::swapchain* swapchain, bool resize) {
   const auto back_buffer = swapchain->get_back_buffer(0);
   const auto desc = device->get_resource_desc(back_buffer);
   const auto color_space = swapchain->get_color_space();
+  if (!resize) vrs::LogSupport(reinterpret_cast<ID3D12Device*>(device->get_native()));
 
   char buf[512];
   std::snprintf(buf, sizeof(buf),
@@ -398,6 +400,8 @@ void PollLiveSettings() {
   diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
   screenshot_requested = LiveInt(path, "Screenshot", screenshot_requested);
   s.force_reset = LiveInt(path, "ForceReset", s.force_reset ? 1 : 0) != 0;
+  vrs::test = LiveInt(path, "VrsTest", 0);
+  vrs::rate = LiveInt(path, "VrsRate", 1);
   {
     static int last_record = 0;   // RecordNV=<n>: a new value arms the recorder for n NR evaluates
     const int v = LiveInt(path, "RecordNV", last_record);
@@ -773,6 +777,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
     reshade::register_event<reshade::addon_event::present>(OnPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
       ui_probe::Register();
+      vrs::Register();
       graded_hook::Register();
       ngx_probe::mark = ui_probe::Mark;
       ngx_probe::after_dlss = graded_hook::OnDlssEvaluated;
@@ -802,6 +807,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       ngx_probe::after_dlss = nullptr;
       graded_hook::Unregister();
       ui_probe::Unregister();
+      vrs::Unregister();
       reshade::unregister_overlay(nullptr, OnDrawOverlay);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::reshade_present>(OnReshadePresent);
