@@ -7,6 +7,8 @@
 //   SrFovea=2        the same, and no game upscale: the rest of the frame is a bilinear stretch (sr_upscale)
 //   SrFovea=3        as 2, with a small temporal accumulation before the stretch (SrTaa: this frame's weight, %)
 //   SrMargin=<px>    output pixels around the crop the rectangle also covers (default 64)
+//   SrFeather=1      the crop's answer goes to a texture of its own and fades in over the margin (0: written
+//                    straight into the frame, a hard edge)
 // The rectangle follows the crop of the frame before (the foveated pass places it later in the frame); when it
 // moves, its DLSS history starts over.
 #pragma once
@@ -16,11 +18,13 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 #include <d3d12.h>
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs.h>
 
+#include "../build/shaders/sr_blend_dxil.h"
 #include "../build/shaders/sr_taa_dxil.h"
 #include "../build/shaders/sr_upscale_dxil.h"
 #include "diag.hpp"
@@ -70,13 +74,14 @@ inline void OnGameCreate(NVSDK_NGX_Parameter* p, LogfFn logf) {
 
 // --- the periphery without the game's upscale (SrFovea=2: a bilinear stretch; 3: a small TAA, then the stretch)
 
-constexpr uint32_t kRing = 8;
-constexpr uint32_t kPerFrame = 8;   // descriptors per frame: TAA t0-t2 u0, stretch t0-t2 u0
+constexpr uint32_t kRing = 16;   // descriptor sets in flight (a frame takes up to two)
+constexpr uint32_t kPerFrame = 12;  // descriptors per frame: TAA t0-t2 u0, stretch t0-t2 u0, blend t0-t2 u0
 
 struct Stretch {
   ID3D12RootSignature* root = nullptr;
   ID3D12PipelineState* pso = nullptr;
   ID3D12PipelineState* taa_pso = nullptr;
+  ID3D12PipelineState* blend_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t step = 0, frame = 0;
   ID3D12Resource* hist[2] = {};   // the accumulation, alternating (NON_PIXEL_SHADER_RESOURCE between frames)
@@ -85,7 +90,8 @@ struct Stretch {
   bool failed = false;
 };
 inline Stretch st;
-inline std::atomic<int> taa_percent{10};   // SrTaa: this frame's weight in the accumulation, in percent
+inline std::atomic<int> taa_percent{10};
+inline std::atomic<int> feather{1};   // SrTaa: this frame's weight in the accumulation, in percent
 
 // [0] SRV table t0-t2, [1] UAV table u0, [2] eight constants b0.
 inline bool StretchInit(ID3D12Device* device) {
@@ -118,6 +124,8 @@ inline bool StretchInit(ID3D12Device* device) {
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.pso)))) return false;
   pso.CS = {sr_taa_dxil, sizeof(sr_taa_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.taa_pso)))) return false;
+  pso.CS = {sr_blend_dxil, sizeof(sr_blend_dxil)};
+  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.blend_pso)))) return false;
   D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRing * kPerFrame,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&st.heap)))) return false;
@@ -253,6 +261,8 @@ struct Crop {
   NVSDK_NGX_Parameter* params = nullptr;
   uint32_t out_w = 0, out_h = 0, in_w = 0, in_h = 0, ratio = 0;
   int base_x = -1, base_y = -1;     // the rectangle's output origin last frame
+  ID3D12Resource* answer = nullptr; // SrFeather: the crop's answer (UNORDERED_ACCESS between frames)
+  uint32_t resets = 0, evals = 0;
   bool failed = false;
 };
 inline Crop cr;
@@ -269,6 +279,65 @@ inline NVSDK_NGX_Parameter* AllocateParameters() {
     }
   }
   return nullptr;
+}
+
+inline bool EnsureAnswer(ID3D12Device* device, DXGI_FORMAT format) {
+  if (cr.answer != nullptr) return true;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  D3D12_RESOURCE_DESC d = {};
+  d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  d.Width = cr.out_w;
+  d.Height = cr.out_h;
+  d.DepthOrArraySize = 1;
+  d.MipLevels = 1;
+  d.Format = format;
+  d.SampleDesc.Count = 1;
+  d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  return SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d,
+                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                   IID_PPV_ARGS(&cr.answer)));
+}
+
+// The crop's answer (UNORDERED_ACCESS, left so) faded into the frame (UNORDERED_ACCESS) at bx,by over `fade` px.
+inline void Blend(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* frame, DXGI_FORMAT format,
+                  uint32_t bx, uint32_t by, uint32_t fade) {
+  const uint32_t base = ((st.frame++) % kRing) * kPerFrame + 8;
+  D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
+  D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
+  auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
+  auto at_gpu = [&](uint32_t i) { return D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + UINT64(base + i) * st.step}; };
+  D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+  v.Format = format;
+  v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+  v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  v.Texture2D.MipLevels = 1;
+  for (uint32_t i = 0; i < 3; ++i) device->CreateShaderResourceView(cr.answer, &v, at_cpu(i));
+  D3D12_UNORDERED_ACCESS_VIEW_DESC u = {};
+  u.Format = format;
+  u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+  device->CreateUnorderedAccessView(frame, nullptr, &u, at_cpu(3));
+  D3D12_RESOURCE_BARRIER b = {};
+  b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+  b.Transition = {cr.answer, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+  cmd->ResourceBarrier(1, &b);
+  const float f = (float)fade;
+  const uint32_t c[8] = {bx, by, cr.out_w, cr.out_h, *reinterpret_cast<const uint32_t*>(&f), 0, 0, 0};
+  ID3D12DescriptorHeap* heaps[] = {st.heap};
+  cmd->SetDescriptorHeaps(1, heaps);
+  cmd->SetComputeRootSignature(st.root);
+  cmd->SetPipelineState(st.blend_pso);
+  cmd->SetComputeRootDescriptorTable(0, at_gpu(0));
+  cmd->SetComputeRootDescriptorTable(1, at_gpu(3));
+  cmd->SetComputeRoot32BitConstants(2, 8, c, 0);
+  cmd->Dispatch((cr.out_w + 15) / 16, (cr.out_h + 15) / 16, 1);
+  std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+  cmd->ResourceBarrier(1, &b);
+  D3D12_RESOURCE_BARRIER uav = {};
+  uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  uav.UAV.pResource = frame;
+  cmd->ResourceBarrier(1, &uav);
 }
 
 // The game's DLSS-SR evaluate (`game`, its Color at render size and Output at full size) is done or skipped;
@@ -385,13 +454,29 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
   p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, cr.in_w);
   p->Set(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Height, cr.in_h);
 
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+  const bool blend = feather.load() != 0 && StretchInit(device) && EnsureAnswer(device, od.Format);
+  if (blend) {   // the answer at the origin of a texture of its own; blended into the frame below
+    p->Set(NVSDK_NGX_Parameter_Output, cr.answer);
+    p->Set(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_X, 0u);
+    p->Set(NVSDK_NGX_Parameter_DLSS_Output_Subrect_Base_Y, 0u);
+  }
+
   diag::SpanStart(crop_span, cmd, ngx_probe::Log);
   const NVSDK_NGX_Result res = evaluate(cmd, cr.handle, p, nullptr);
+  if (blend && res == NVSDK_NGX_Result_Success) Blend(cmd, device, output, od.Format, bx, by, m);
   diag::SpanStop(crop_span, cmd);
-  static uint32_t evals = 0;
-  if (++evals <= 3 || res != NVSDK_NGX_Result_Success)
-    logf("sr-fovea: crop evaluate #%u at %u,%u (%s) => 0x%x", evals, bx, by, moved ? "moved, reset" : "held",
-         (unsigned)res);
+  device->Release();
+  ++cr.evals;
+  cr.resets += moved ? 1 : 0;
+  if (cr.evals <= 3 || res != NVSDK_NGX_Result_Success)
+    logf("sr-fovea: crop evaluate #%u at %u,%u (%s, %s) => 0x%x", cr.evals, bx, by, moved ? "moved, reset" : "held",
+         blend ? "feathered" : "hard edge", (unsigned)res);
+  if (cr.evals % 600 == 0) {
+    logf("sr-fovea: last 600 crop evaluates: %u history resets (the rectangle moved)", cr.resets);
+    cr.resets = 0;
+  }
 }
 
 }  // namespace sr_fovea
