@@ -39,7 +39,8 @@ inline void OnBind(reshade::api::command_list* cmd, uint32_t count, const reshad
   bool coarse = false;
   if (on && count > 0 && rtvs[0].handle != 0) {
     reshade::api::device* dev = cmd->get_device();
-    coarse = Wanted(dev->get_resource_desc(dev->get_resource_from_view(rtvs[0])));
+    const reshade::api::resource res = dev->get_resource_from_view(rtvs[0]);   // 0 for views ReShade does not track
+    coarse = res.handle != 0 && Wanted(dev->get_resource_desc(res));
   }
   auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
   ID3D12GraphicsCommandList5* l5 = nullptr;
@@ -49,7 +50,6 @@ inline void OnBind(reshade::api::command_list* cmd, uint32_t count, const reshad
     return;
   }
   if (call.load() == 1) coarse = false;
-  // Explicit combiners: vkd3d-proton reads them without a null check (a null here crashed the game).
   const D3D12_SHADING_RATE_COMBINER keep[2] = {D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
                                                D3D12_SHADING_RATE_COMBINER_PASSTHROUGH};
   l5->RSSetShadingRate(coarse ? Rate() : D3D12_SHADING_RATE_1X1, keep);
