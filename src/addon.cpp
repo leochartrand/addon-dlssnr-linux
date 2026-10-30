@@ -125,9 +125,10 @@ void SaveSettings();
 char toast[128] = {};
 LARGE_INTEGER toast_at = {};
 void Toast() {
-  std::snprintf(toast, sizeof(toast), "SR crop: %s (%s)   NR crop: %s",
+  std::snprintf(toast, sizeof(toast), "SR crop: %s (%s)   NR crop: %s (%s)",
                 sr_fovea::mode.load() != 0 ? "on" : "off", PresetName(sr_fovea::crop_preset.load()),
-                fov::settings.crop_pass ? "on" : "off");
+                fov::settings.crop_pass ? "on" : "off",
+                fov::settings.crop_on_periphery ? "on the periphery" : "on the raw frame");
   QueryPerformanceCounter(&toast_at);
 }
 // The note in the corner, drawn every frame for two seconds after a key (the overlay itself may be closed).
@@ -157,15 +158,16 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
   if (f10_down && !f10_was_down) nr_runner::SetEnabled(!nr_runner::IsEnabled());
   f10_was_down = f10_down;
   // The crop A/B keys (F9 is the game's quickload, F5 its quicksave): F6 the crop's DLSS-SR on/off, F7 its
-  // preset (default, E, K, M), F8 the NR crop pass on/off. Each shows a note on screen for two seconds.
-  static bool was[3] = {};
-  const int keys[3] = {VK_F6, VK_F7, VK_F8};
-  for (int i = 0; i < 3; ++i) {
+  // preset (default, E, K, M), F8 the NR crop pass on/off, F11 whether it works on the periphery's result. Each shows a note on screen for two seconds.
+  static bool was[4] = {};
+  const int keys[4] = {VK_F6, VK_F7, VK_F8, VK_F11};
+  for (int i = 0; i < 4; ++i) {
     const bool down = (GetAsyncKeyState(keys[i]) & 0x8000) != 0;
     if (down && !was[i]) {
       if (i == 0) sr_fovea::mode = sr_fovea::mode.load() == 0 ? 1 : 0;
       if (i == 1) sr_fovea::crop_preset = NextCropPreset(sr_fovea::crop_preset.load());
       if (i == 2) fov::settings.crop_pass = !fov::settings.crop_pass;
+      if (i == 3) fov::settings.crop_on_periphery = !fov::settings.crop_on_periphery;
       Toast();
       SaveSettings();
     }
@@ -244,6 +246,7 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::get_config_value(nullptr, kConfigSection, "CropPass", f.crop_pass);
+  reshade::get_config_value(nullptr, kConfigSection, "CropOnPeriphery", f.crop_on_periphery);
   {
     int v[5] = {sr_fovea::preset, sr_fovea::mode, sr_fovea::crop_preset, sr_fovea::shift, sr_fovea::fade_in};
     reshade::get_config_value(nullptr, kConfigSection, "SrPreset", v[0]);
@@ -349,6 +352,7 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
   reshade::set_config_value(nullptr, kConfigSection, "CropPass", f.crop_pass);
+  reshade::set_config_value(nullptr, kConfigSection, "CropOnPeriphery", f.crop_on_periphery);
   reshade::set_config_value(nullptr, kConfigSection, "SrPreset", sr_fovea::preset.load());
   reshade::set_config_value(nullptr, kConfigSection, "SrFovea", sr_fovea::mode.load());
   reshade::set_config_value(nullptr, kConfigSection, "SrCropPreset", sr_fovea::crop_preset.load());
@@ -457,6 +461,7 @@ void PollLiveSettings() {
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
   f.crop_pass = LiveInt(path, "CropPass", f.crop_pass ? 1 : 0) != 0;
+  f.crop_on_periphery = LiveInt(path, "CropOnPeriphery", f.crop_on_periphery ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   LiveString(path, "EngineCrop", s.engine_crop, sizeof(s.engine_crop));
   LiveString(path, "EngineLow", s.engine_low, sizeof(s.engine_low));
@@ -783,6 +788,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       if (two_calls)
         changed |= ImGui::Checkbox("Run the crop pass (F8; off: its answer is its input, the periphery's tone kept)",
                                    &f.crop_pass);
+      if (two_calls && f.periphery_pass)
+        changed |= ImGui::Checkbox("The crop works on the periphery's result (F11; off: on the raw frame, in parallel)",
+                                   &f.crop_on_periphery);
       ImGui::SeparatorText("The periphery (the whole frame, low resolution)");
       if (two_calls) {
         changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",

@@ -907,7 +907,9 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
     global_fresh = every == 1 || frame % (uint32_t)every == 0 || fov::NeedsGlobal();
     const bool periphery = global_fresh && fov::settings.periphery_pass;
     const int crop_reset = reset;   // the periphery's own reset (every > 1) must not reach the crop
-    if (use_engine && nr_engine::CropNeedsContext()) {
+    // The crop on top of the periphery: its input takes the periphery's change, so the periphery runs first.
+    const bool on_periphery = periphery && fov::settings.crop_on_periphery;
+    if ((use_engine && nr_engine::CropNeedsContext()) || on_periphery) {
       // Scene context: the crop's bottleneck reads the periphery's tokens of this frame, so the periphery runs first.
       result = 1;
       if (periphery) {
@@ -915,6 +917,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
         result = call(s.feature2, true, l.low_x, 0, l.low_w, l.low_h);
         reset = crop_reset;
       }
+      if (result == 1 && on_periphery) fov::SplitPrecrop(cmd, in_color, answer, frame);
       if (result == 1) result = call(s.feature, false, 0, 0, l.crop_w, l.crop_h);
     } else {
       result = call(s.feature, false, 0, 0, l.crop_w, l.crop_h);
