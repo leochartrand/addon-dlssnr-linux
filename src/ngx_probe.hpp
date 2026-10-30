@@ -204,6 +204,7 @@ inline void DumpNrEvalParams(const NVSDK_NGX_Parameter* params) {
 // The milestone-4 runner drives feature 18 through the forwarder; it logs via ngx_probe::Logf, so
 // it is included here, between the helpers and the hooks that call into it.
 #include "nr_runner.hpp"
+#include "sr_fovea.hpp"
 
 namespace ngx_probe {
 
@@ -229,6 +230,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12CreateFeature(
        static_cast<int>(feature_id), FeatureName(feature_id));
   DumpCreateParams(params);
   if (feature_id == NVSDK_NGX_Feature_Reserved18) DumpNrCreateParams(params);
+  if (feature_id == NVSDK_NGX_Feature_SuperSampling && params != nullptr) sr_fovea::OnGameCreate(params, Logf);
   const auto result = real_D3D12_CreateFeature(cmd_list, feature_id, params, out_handle);
   Logf("ngx-probe: D3D12_CreateFeature => 0x%x handle=%p", static_cast<unsigned>(result),
        (out_handle != nullptr) ? static_cast<void*>(*out_handle) : nullptr);
@@ -281,9 +283,25 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   ID3D12Resource* const swapped = nr_runner::BeforeDlss(cmd_list, params);
   // DLAA off: the frame is copied to the Output instead of DLSS-SR's 1:1 pass, and the pass runs on it.
   const bool copy_instead = swapped == nullptr && nr_runner::CopyInsteadOfDlaa(cmd_list, params);
+  // Foveated SR (sr_fovea.hpp): the game's upscale, or a bilinear stretch instead of it, then DLSS-SR on the crop.
+  const int sr_mode = swapped == nullptr && !copy_instead ? sr_fovea::mode.load() : 0;
   if (!copy_instead) diag::SpanStart(diag::dlss_sr, cmd_list, Log);
-  const auto eval_result = copy_instead ? NVSDK_NGX_Result_Success
-                                        : real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
+  NVSDK_NGX_Result eval_result = NVSDK_NGX_Result_Success;
+  if (copy_instead) {
+  } else if (sr_mode == 2) {
+    ID3D12Resource *color = nullptr, *output = nullptr;
+    float jx = 0.0f, jy = 0.0f;
+    params->Get(NVSDK_NGX_Parameter_Color, &color);
+    params->Get(NVSDK_NGX_Parameter_Output, &output);
+    params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &jx);
+    params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jy);
+    if (color == nullptr || output == nullptr || !sr_fovea::StretchRecord(cmd_list, color, output, jx, jy))
+      eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
+  } else {
+    eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
+  }
+  if (sr_mode != 0 && eval_result == NVSDK_NGX_Result_Success)
+    sr_fovea::CropEvaluate(cmd_list, params, real_D3D12_CreateFeature, real_D3D12_EvaluateFeature, Logf);
   if (!copy_instead) diag::SpanStop(diag::dlss_sr, cmd_list);
   if (swapped != nullptr)
     nr_runner::AfterDlss(cmd_list, params, swapped);

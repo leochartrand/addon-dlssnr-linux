@@ -362,6 +362,11 @@ void PollLiveSettings() {
   s.engine_history = Clamp(LiveFloat(path, "EngineHistory", s.engine_history), 0.0f, 1.0f);
   diag::dump_requested = LiveInt(path, "DumpFrame", diag::dump_requested);
   diag::dump_burst = LiveInt(path, "DumpBurst", diag::dump_burst);
+  sr_fovea::preset = LiveInt(path, "SrPreset", 0);
+  sr_fovea::mode = LiveInt(path, "SrFovea", 0);
+  sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", 0);
+  sr_fovea::margin = LiveInt(path, "SrMargin", 64);
+  sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
 
   // The same bounds a hand-edited ReShade.ini gets.
   s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
