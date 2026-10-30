@@ -142,7 +142,6 @@ void OnReshadeOverlay(reshade::api::effect_runtime*) {
   ImGui::Begin("##dlssnr-toast", nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings);
-  ImGui::SetWindowFontScale(2.0f);
   ImGui::TextUnformatted(toast);
   ImGui::End();
 }
