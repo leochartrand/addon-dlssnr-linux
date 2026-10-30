@@ -5,6 +5,7 @@
 //   SrFovea=1        a second DLSS-SR, created here, on a rectangle around the gaze crop only (SrCropPreset),
 //                    written over the game's upscale
 //   SrFovea=2        the same, and no game upscale: the rest of the frame is a bilinear stretch (sr_upscale)
+//   SrFovea=3        as 2, with a small temporal accumulation before the stretch (SrTaa: this frame's weight, %)
 //   SrMargin=<px>    output pixels around the crop the rectangle also covers (default 64)
 // The rectangle follows the crop of the frame before (the foveated pass places it later in the frame); when it
 // moves, its DLSS history starts over.
@@ -20,6 +21,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_defs.h>
 
+#include "../build/shaders/sr_taa_dxil.h"
 #include "../build/shaders/sr_upscale_dxil.h"
 #include "diag.hpp"
 #include "fov.hpp"
@@ -66,25 +68,31 @@ inline void OnGameCreate(NVSDK_NGX_Parameter* p, LogfFn logf) {
   if (v > 0) SetPresetHints(p, (unsigned)v);
 }
 
-// --- the bilinear stretch (SrFovea=2) ---------------------------------------
+// --- the periphery without the game's upscale (SrFovea=2: a bilinear stretch; 3: a small TAA, then the stretch)
 
 constexpr uint32_t kRing = 8;
+constexpr uint32_t kPerFrame = 8;   // descriptors per frame: TAA t0-t2 u0, stretch t0-t2 u0
 
 struct Stretch {
   ID3D12RootSignature* root = nullptr;
   ID3D12PipelineState* pso = nullptr;
+  ID3D12PipelineState* taa_pso = nullptr;
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t step = 0, frame = 0;
+  ID3D12Resource* hist[2] = {};   // the accumulation, alternating (NON_PIXEL_SHADER_RESOURCE between frames)
+  uint32_t hist_w = 0, hist_h = 0, flip = 0;
+  bool hist_valid = false;
   bool failed = false;
 };
 inline Stretch st;
+inline std::atomic<int> taa_percent{10};   // SrTaa: this frame's weight in the accumulation, in percent
 
-// Root signature as nr_compose's: [0] SRV table t0-t1, [1] UAV table u0, [2] eight constants b0.
+// [0] SRV table t0-t2, [1] UAV table u0, [2] eight constants b0.
 inline bool StretchInit(ID3D12Device* device) {
   if (st.pso != nullptr) return true;
   if (st.failed) return false;
   st.failed = true;
-  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0};
+  D3D12_DESCRIPTOR_RANGE srv = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3, 0, 0, 0};
   D3D12_DESCRIPTOR_RANGE uav = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0};
   D3D12_ROOT_PARAMETER params[3] = {};
   params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -108,7 +116,9 @@ inline bool StretchInit(ID3D12Device* device) {
   pso.pRootSignature = st.root;
   pso.CS = {sr_upscale_dxil, sizeof(sr_upscale_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.pso)))) return false;
-  D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRing * 3,
+  pso.CS = {sr_taa_dxil, sizeof(sr_taa_dxil)};
+  if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&st.taa_pso)))) return false;
+  D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, kRing * kPerFrame,
                                    D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0};
   if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&st.heap)))) return false;
   st.step = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -116,40 +126,115 @@ inline bool StretchInit(ID3D12Device* device) {
   return true;
 }
 
-// color (NON_PIXEL_SHADER_RESOURCE) stretched into output (UNORDERED_ACCESS); both stay in their states.
-inline bool StretchRecord(ID3D12GraphicsCommandList* cmd, ID3D12Resource* color, ID3D12Resource* output,
-                          float jx, float jy) {
+inline bool EnsureHistory(ID3D12Device* device, const D3D12_RESOURCE_DESC& color) {
+  if (st.hist[0] != nullptr && st.hist_w == color.Width && st.hist_h == color.Height) return true;
+  for (auto*& h : st.hist)
+    if (h != nullptr) h->Release(), h = nullptr;
+  D3D12_HEAP_PROPERTIES heap = {};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  D3D12_RESOURCE_DESC d = {};
+  d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  d.Width = color.Width;
+  d.Height = color.Height;
+  d.DepthOrArraySize = 1;
+  d.MipLevels = 1;
+  d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+  d.SampleDesc.Count = 1;
+  d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  for (auto*& h : st.hist)
+    if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d,
+                                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+                                               IID_PPV_ARGS(&h))))
+      return false;
+  st.hist_w = (uint32_t)color.Width;
+  st.hist_h = color.Height;
+  st.hist_valid = false;
+  return true;
+}
+
+// The game's Color (NON_PIXEL_SHADER_RESOURCE) into its Output (UNORDERED_ACCESS), both left in their states:
+// stretched as it is (taa false), or accumulated first. `game` gives the motion vectors, jitter and reset.
+inline bool StretchRecord(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game, bool taa) {
+  ID3D12Resource *color = nullptr, *output = nullptr, *motion = nullptr;
+  float jx = 0.0f, jy = 0.0f, mvx = 1.0f, mvy = 1.0f;
+  int reset = 0;
+  game->Get(NVSDK_NGX_Parameter_Color, &color);
+  game->Get(NVSDK_NGX_Parameter_Output, &output);
+  game->Get(NVSDK_NGX_Parameter_MotionVectors, &motion);
+  game->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &jx);
+  game->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jy);
+  game->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvx);
+  game->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvy);
+  game->Get(NVSDK_NGX_Parameter_Reset, &reset);
+  if (color == nullptr || output == nullptr || (taa && motion == nullptr)) return false;
   ID3D12Device* device = nullptr;
   if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return false;
-  const bool ok = StretchInit(device);
+  const D3D12_RESOURCE_DESC cd = color->GetDesc(), od = output->GetDesc();
+  bool ok = StretchInit(device) && (!taa || EnsureHistory(device, cd));
   if (ok) {
-    const uint32_t base = (st.frame++ % kRing) * 3;
+    const uint32_t base = (st.frame++ % kRing) * kPerFrame;
     D3D12_CPU_DESCRIPTOR_HANDLE cpu = st.heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_GPU_DESCRIPTOR_HANDLE gpu = st.heap->GetGPUDescriptorHandleForHeapStart();
     auto at_cpu = [&](uint32_t i) { return D3D12_CPU_DESCRIPTOR_HANDLE{cpu.ptr + SIZE_T(base + i) * st.step}; };
     auto at_gpu = [&](uint32_t i) { return D3D12_GPU_DESCRIPTOR_HANDLE{gpu.ptr + UINT64(base + i) * st.step}; };
-    const D3D12_RESOURCE_DESC cd = color->GetDesc(), od = output->GetDesc();
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
-    srv.Format = cd.Format;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Texture2D.MipLevels = 1;
-    device->CreateShaderResourceView(color, &srv, at_cpu(0));
-    device->CreateShaderResourceView(color, &srv, at_cpu(1));
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
-    uav.Format = od.Format;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    device->CreateUnorderedAccessView(output, nullptr, &uav, at_cpu(2));
-    const float sign = (float)jitter_sign.load();
-    const float fx = jx * sign, fy = jy * sign;
-    const uint32_t c[8] = {(uint32_t)cd.Width, cd.Height, (uint32_t)od.Width, od.Height,
-                           *reinterpret_cast<const uint32_t*>(&fx), *reinterpret_cast<const uint32_t*>(&fy), 0, 0};
+    auto srv = [&](ID3D12Resource* r, DXGI_FORMAT f, uint32_t i) {
+      D3D12_SHADER_RESOURCE_VIEW_DESC v = {};
+      v.Format = f;
+      v.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+      v.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      v.Texture2D.MipLevels = 1;
+      device->CreateShaderResourceView(r, &v, at_cpu(i));
+    };
+    auto uav = [&](ID3D12Resource* r, DXGI_FORMAT f, uint32_t i) {
+      D3D12_UNORDERED_ACCESS_VIEW_DESC v = {};
+      v.Format = f;
+      v.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+      device->CreateUnorderedAccessView(r, nullptr, &v, at_cpu(i));
+    };
+    auto bits = [](float f) { return *reinterpret_cast<const uint32_t*>(&f); };
+    auto transition = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+      D3D12_RESOURCE_BARRIER b = {};
+      b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+      b.Transition = {r, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, from, to};
+      cmd->ResourceBarrier(1, &b);
+    };
     ID3D12DescriptorHeap* heaps[] = {st.heap};
     cmd->SetDescriptorHeaps(1, heaps);
     cmd->SetComputeRootSignature(st.root);
+
+    ID3D12Resource* source = color;
+    DXGI_FORMAT source_format = cd.Format;
+    float sx = jx * (float)jitter_sign.load(), sy = jy * (float)jitter_sign.load();
+    if (taa) {
+      ID3D12Resource* prev = st.hist[st.flip];
+      ID3D12Resource* next = st.hist[st.flip ^ 1];
+      st.flip ^= 1;
+      srv(color, cd.Format, 0);
+      srv(prev, DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+      srv(motion, motion->GetDesc().Format, 2);
+      uav(next, DXGI_FORMAT_R16G16B16A16_FLOAT, 3);
+      const float w = (reset != 0 || !st.hist_valid) ? 1.0f : (float)taa_percent.load() / 100.0f;
+      st.hist_valid = true;
+      const uint32_t c[8] = {(uint32_t)cd.Width, cd.Height, bits(mvx), bits(mvy), bits(w), 0, 0, 0};
+      transition(next, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      cmd->SetPipelineState(st.taa_pso);
+      cmd->SetComputeRootDescriptorTable(0, at_gpu(0));
+      cmd->SetComputeRootDescriptorTable(1, at_gpu(3));
+      cmd->SetComputeRoot32BitConstants(2, 8, c, 0);
+      cmd->Dispatch(((uint32_t)cd.Width + 15) / 16, (cd.Height + 15) / 16, 1);
+      transition(next, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      source = next;
+      source_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+      sx = sy = 0.0f;   // the accumulation has no jitter of its own
+    }
+    srv(source, source_format, 4);
+    srv(source, source_format, 5);
+    srv(source, source_format, 6);
+    uav(output, od.Format, 7);
+    const uint32_t c[8] = {(uint32_t)cd.Width, cd.Height, (uint32_t)od.Width, od.Height, bits(sx), bits(sy), 0, 0};
     cmd->SetPipelineState(st.pso);
-    cmd->SetComputeRootDescriptorTable(0, at_gpu(0));
-    cmd->SetComputeRootDescriptorTable(1, at_gpu(2));
+    cmd->SetComputeRootDescriptorTable(0, at_gpu(4));
+    cmd->SetComputeRootDescriptorTable(1, at_gpu(7));
     cmd->SetComputeRoot32BitConstants(2, 8, c, 0);
     cmd->Dispatch(((uint32_t)od.Width + 15) / 16, (od.Height + 15) / 16, 1);
     D3D12_RESOURCE_BARRIER b = {};
