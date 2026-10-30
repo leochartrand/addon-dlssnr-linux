@@ -39,6 +39,17 @@ inline std::atomic<bool> wanted{false};  // the game configures frame generation
 inline DXGI_FORMAT game_format = DXGI_FORMAT_UNKNOWN;   // the game's HUD-less image's
 inline uint32_t swapped = 0, kept = 0, configures = 0;
 
+// The same pixels, typed or not (the game may hand frame generation a typeless image).
+inline DXGI_FORMAT Family(DXGI_FORMAT f) {
+  switch (f) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    case DXGI_FORMAT_R10G10B10A2_UNORM: return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_TYPELESS;
+    default: return f;
+  }
+}
+
 inline const char* TypeName(uint64_t t) {
   switch (t) {
     case FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION: return "create framegeneration";
@@ -107,10 +118,26 @@ inline ffxReturnCode_t HookConfigure(ffxContext* context, const ffxConfigureDesc
   } else {
     wanted = false;
   }
-  const bool swap = enabled.load() != 0 && game != nullptr && d.frameGenerationEnabled && hudless != nullptr &&
-                    fresh.exchange(false);
+  bool swap = enabled.load() != 0 && game != nullptr && d.frameGenerationEnabled && hudless != nullptr &&
+              fresh.exchange(false);
+  if (swap) {
+    const D3D12_RESOURCE_DESC ours = hudless->GetDesc(), theirs = game->GetDesc();
+    if (Family(ours.Format) != Family(theirs.Format) || ours.Width != theirs.Width || ours.Height != theirs.Height) {
+      static bool told = false;
+      if (!told)
+        ngx_probe::Logf("ffx-probe: the game's HUD-less image (%llux%u format %u) does not match the NR pass's "
+                        "(%llux%u format %u): the game's is kept", (unsigned long long)theirs.Width, theirs.Height,
+                        (unsigned)theirs.Format, (unsigned long long)ours.Width, ours.Height, (unsigned)ours.Format);
+      told = true;
+      swap = false;
+    }
+  }
   if (swap) {
     d.HUDLessColor = ffxApiGetResourceDX12(hudless, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    d.HUDLessColor.description.format = d.HUDLessColor.description.format == 0
+                                            ? reinterpret_cast<const ffxConfigureDescFrameGeneration*>(desc)
+                                                  ->HUDLessColor.description.format
+                                            : d.HUDLessColor.description.format;
     ++swapped;
   } else if (game != nullptr && d.frameGenerationEnabled) {
     ++kept;
