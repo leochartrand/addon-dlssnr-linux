@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 #include <cstring>
 #include <vector>
 
@@ -225,6 +226,36 @@ struct State {
 };
 
 inline State g;
+
+// The tone history (low[8], low[9]) of a second pass in the same frame, swapped in around it (nr_engine::SwapHistory).
+struct ToneSet {
+  ID3D12Resource* hist[2] = {};
+  uint32_t flip = 0;
+  bool valid = false;
+};
+inline ToneSet second_tone;
+inline void SwapTone(ID3D12Device* device) {
+  ToneSet& o = second_tone;
+  if (g.low[8] == nullptr) return;
+  const D3D12_RESOURCE_DESC d = g.low[8]->GetDesc();
+  for (auto*& r : o.hist) {
+    if (r != nullptr && (r->GetDesc().Width != d.Width || r->GetDesc().Height != d.Height)) {
+      r->Release();   // a new layout: the frame that changed it ran neither pass's history
+      r = nullptr;
+      o.valid = false;
+    }
+    D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_DEFAULT};
+    if (r == nullptr && FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d,
+                                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+                                                                IID_PPV_ARGS(&r))))
+      r = nullptr;
+  }
+  if (o.hist[0] == nullptr || o.hist[1] == nullptr) return;
+  std::swap(g.low[8], o.hist[0]);
+  std::swap(g.low[9], o.hist[1]);
+  std::swap(g.hist_flip, o.flip);
+  std::swap(g.hist_valid, o.valid);
+}
 
 inline void Bury(ID3D12Resource*& r) {
   if (r != nullptr) g.graves.push_back({r, 240});
