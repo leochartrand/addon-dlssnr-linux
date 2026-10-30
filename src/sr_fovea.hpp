@@ -55,6 +55,7 @@ using CreateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, NVSDK
                                                 NVSDK_NGX_Handle**);
 using EvaluateFn = NVSDK_NGX_Result(NVSDK_CONV*)(ID3D12GraphicsCommandList*, const NVSDK_NGX_Handle*,
                                                   const NVSDK_NGX_Parameter*, PFN_NVSDK_NGX_ProgressCallback);
+using ReleaseFn = NVSDK_NGX_Result(NVSDK_CONV*)(NVSDK_NGX_Handle*);
 
 inline void SetPresetHints(NVSDK_NGX_Parameter* p, unsigned v) {
   p->Set(NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, v);
@@ -279,6 +280,9 @@ struct Crop {
   ID3D12Resource* age[2] = {};      // SrFadeIn: frames of history per pixel, alternating (NON_PIXEL_SHADER_RESOURCE)
   uint32_t age_flip = 0;
   ID3D12Resource* motion = nullptr; // SrShift: its motion vectors, shifted (NON_PIXEL_SHADER_RESOURCE between frames)
+  int made_preset = 0;              // the SrCropPreset its DLSS-SR was created with
+  NVSDK_NGX_Handle* retired = nullptr;   // the one before a preset change, released once the GPU is past it
+  uint32_t retired_frames = 0;
   uint32_t resets = 0, shifts = 0, evals = 0;
   bool failed = false;
 };
@@ -491,7 +495,17 @@ inline void Blend(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Re
 // The game's DLSS-SR evaluate (`game`, its Color at render size and Output at full size) is done or skipped;
 // run the crop's over the rectangle around last frame's gaze crop.
 inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Parameter* game, CreateFn create,
-                         EvaluateFn evaluate, LogfFn logf) {
+                         EvaluateFn evaluate, ReleaseFn release, LogfFn logf) {
+  if (cr.retired != nullptr && --cr.retired_frames == 0) {
+    if (release != nullptr) release(cr.retired);
+    cr.retired = nullptr;
+  }
+  if (cr.handle != nullptr && cr.retired == nullptr && cr.made_preset != crop_preset.load()) {
+    cr.retired = cr.handle;   // a new preset: a new DLSS-SR (the preset is read at its create)
+    cr.retired_frames = 8;
+    cr.handle = nullptr;
+    cr.base_x = -1;
+  }
   if (cr.failed) return;
   ID3D12Resource *color = nullptr, *output = nullptr, *depth = nullptr, *motion = nullptr, *exposure = nullptr;
   game->Get(NVSDK_NGX_Parameter_Color, &color);
@@ -536,7 +550,7 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
     return;
   }
   if (cr.handle == nullptr) {
-    cr.params = AllocateParameters();
+    if (cr.params == nullptr) cr.params = AllocateParameters();
     if (cr.params == nullptr) {
       logf("sr-fovea: NVSDK_NGX_D3D12_AllocateParameters unavailable");
       cr.failed = true;
@@ -559,7 +573,8 @@ inline void CropEvaluate(ID3D12GraphicsCommandList* cmd, const NVSDK_NGX_Paramet
                                                                : NVSDK_NGX_PerfQuality_Value_DLAA));
     p->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, (int)game_flags.load());
     p->Set(NVSDK_NGX_Parameter_DLSS_Enable_Output_Subrects, 1);
-    if (crop_preset.load() > 0) SetPresetHints(p, (unsigned)crop_preset.load());
+    cr.made_preset = crop_preset.load();
+    SetPresetHints(p, cr.made_preset > 0 ? (unsigned)cr.made_preset : 0u);   // 0: the default (clears a rebuild's)
     const NVSDK_NGX_Result res = create(cmd, NVSDK_NGX_Feature_SuperSampling, p, &cr.handle);
     logf("sr-fovea: crop DLSS-SR %ux%u -> %ux%u (preset %d, flags %d) => 0x%x", cr.in_w, cr.in_h, cr.out_w,
          cr.out_h, crop_preset.load(), game_flags.load(), (unsigned)res);
