@@ -18,6 +18,7 @@
 #include <detours.h>
 
 #include "third_party/ffx/api/include/dx12/ffx_api_dx12.h"
+#include "third_party/ffx/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h"
 #include "third_party/ffx/framegeneration/include/ffx_framegeneration.h"
 
 // Included by addon.cpp after ngx_probe.hpp (its logging) and nr_runner.hpp.
