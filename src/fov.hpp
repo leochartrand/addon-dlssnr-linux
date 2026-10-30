@@ -33,13 +33,14 @@
 #include "../build/shaders/fov_split_low_dxil.h"
 #include "../build/shaders/fov_split_blur_dxil.h"
 #include "../build/shaders/fov_split_expand_dxil.h"
+#include "../build/shaders/fov_split_precrop_dxil.h"
 #include "../build/shaders/fov_split_crop_dxil.h"
 
 namespace fov {
 
 constexpr uint32_t kRingSize = 8;         // frames of descriptors in flight
 enum Pass : uint32_t { kDebug, kSplitSqueeze, kSplitLow, kSplitBlurH, kSplitBlurV,
-                       kSplitExpand, kPasses };
+                       kSplitExpand, kSplitPrecrop, kPasses };
 constexpr uint32_t kSlotsPerPass = 9;     // t0-t5 (t3 the crop state), u0-u2
 constexpr uint32_t kConstants = 31;       // FovConstants in fov_common.hlsli
 constexpr uint32_t kSplitGap = 16;        // atlas pixels between the crop and the low-res frame
@@ -75,6 +76,7 @@ struct Settings {
   // with its own coarse part.
   bool periphery_pass = true;
   bool crop_pass = true;   // off: the crop's answer is its input (the model still runs, at intensity 0)
+  bool crop_on_periphery = false;   // the crop's input is the frame plus the periphery's change (fov_split_precrop)
   // Split with two calls: the engine programs' fields (nr_engine), which the regions snap to for both
   // backends unless free_sizes (0 = no programs, or free sizes: the regions follow the settings above).
   // Set by the runner each frame.
@@ -183,7 +185,7 @@ inline bool GazeLatest(float* x, float* y) {
 struct State {
   ID3D12RootSignature* root_sig = nullptr;
   ID3D12PipelineState* debug_pso = nullptr;
-  ID3D12PipelineState* split_pso[4] = {};   // squeeze, low, blur, expand
+  ID3D12PipelineState* split_pso[5] = {};   // squeeze, low, blur, expand, precrop
   ID3D12DescriptorHeap* heap = nullptr;
   uint32_t descriptor_size = 0;
   bool failed = false;
@@ -329,11 +331,12 @@ inline bool Init(ID3D12Device* device) {
   pso.pRootSignature = g.root_sig;
   pso.CS = {fov_debug_dxil, sizeof(fov_debug_dxil)};
   if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.debug_pso)))) { g.failed = true; return false; }
-  const D3D12_SHADER_BYTECODE split[4] = {{fov_split_squeeze_dxil, sizeof(fov_split_squeeze_dxil)},
+  const D3D12_SHADER_BYTECODE split[5] = {{fov_split_squeeze_dxil, sizeof(fov_split_squeeze_dxil)},
                                           {fov_split_low_dxil, sizeof(fov_split_low_dxil)},
                                           {fov_split_blur_dxil, sizeof(fov_split_blur_dxil)},
-                                          {fov_split_expand_dxil, sizeof(fov_split_expand_dxil)}};
-  for (int i = 0; i < 4; ++i) {
+                                          {fov_split_expand_dxil, sizeof(fov_split_expand_dxil)},
+                                          {fov_split_precrop_dxil, sizeof(fov_split_precrop_dxil)}};
+  for (int i = 0; i < 5; ++i) {
     pso.CS = split[i];
     if (FAILED(device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&g.split_pso[i])))) { g.failed = true; return false; }
   }
@@ -719,6 +722,31 @@ inline bool SplitSqueeze(ID3D12GraphicsCommandList* cmd, ID3D12Resource* proxy, 
   g.prev_crop_y = (int)g.crop_y;
   device->Release();
   return true;
+}
+
+// Between the periphery's model call and the crop's: the crop's input in the atlas (`atlas`, NON_PIXEL_SHADER_RESOURCE,
+// left so) becomes the frame plus the periphery's change, read from its answer (`answer`, UNORDERED_ACCESS, left so).
+inline void SplitPrecrop(ID3D12GraphicsCommandList* cmd, ID3D12Resource* atlas, ID3D12Resource* answer,
+                         uint32_t frame) {
+  ID3D12Device* device = nullptr;
+  if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+  const uint32_t full_w = g.x.full, full_h = g.y.full;
+  const SplitLayout l = SplitSize(full_w, full_h);
+  constexpr auto kUav = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  constexpr auto kSrv = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  uint32_t c[kConstants] = {};
+  SplitConstants(c, l, full_w, full_h, g.render_w, g.render_h, g.mv_x, g.mv_y);
+  D3D12_RESOURCE_BARRIER written = {};
+  written.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+  written.UAV.pResource = answer;
+  cmd->ResourceBarrier(1, &written);
+  Barrier(cmd, atlas, kSrv, kUav);
+  Bind(device, cmd, g.split_pso[4], frame, kSplitPrecrop,
+       {{nullptr, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}, {nullptr, kRgba}},
+       {{atlas, kRgba}, {answer, kRgba}, {nullptr, kRg16}}, c);
+  cmd->Dispatch((l.crop_w + 7) / 8, (l.crop_h + 7) / 8, 1);
+  Barrier(cmd, atlas, kUav, kSrv);
+  device->Release();
 }
 
 // Whether the whole-frame pass must run this frame: there is no tone history to carry yet.
