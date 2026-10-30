@@ -44,6 +44,7 @@ inline uint32_t depth_state = 0, motion_state = 0;   // the guides' states, 0 = 
 inline uint64_t pso = 0;
 inline Tables graphics, compute;
 inline uint32_t ran = 0, failed = 0, missed = 0, presents = 0;
+inline uint32_t presents_armed = 0;      // presents since the evaluate armed it (OnPresent)
 inline bool logged_first = false;
 
 inline uint32_t StateOf(reshade::api::resource_usage u) {
@@ -91,7 +92,9 @@ inline void OnDlssEvaluated() {
   pso = 0;
   graphics = {};
   compute = {};
+  if (armed) ++missed;   // the frame before never reached its grade
   armed = true;
+  presents_armed = 0;
 }
 
 // The game-facing list behind an add-on event's command_list: ReShade's D3D12 proxy derives from the D3D12
@@ -257,13 +260,20 @@ inline void OnBindTables(reshade::api::command_list* cmd, reshade::api::shader_s
   for (uint32_t i = 0; i < count; ++i) t.tables[first + i] = tables[i].handle;
 }
 
+// A frame the pass never found is dropped after a few presents, not at the first: with frame generation the
+// presenter's thread also presents the generated frames, independently of the game's render thread, and one
+// landing between the evaluate and the grade dropped that rendered frame's pass (with ray tracing ~1 in 60).
+// Frame generation adds at most kGeneratedPerFrame presents per rendered frame.
+constexpr uint32_t kGeneratedPerFrame = 3;
+
 inline void OnPresent() {
   std::lock_guard<std::mutex> g(m);
-  if (armed) {
+  if (armed && ++presents_armed > kGeneratedPerFrame) {
     armed = false;
     ++missed;
+    nr_runner::graded_guides_valid = false;
   }
-  nr_runner::graded_guides_valid = false;
+  if (!armed) presents_armed = 0;
   if (++presents % 600 == 0 && ran + failed + missed > 0) {
     ngx_probe::Logf("graded: last 600 frames: pass ran %u, failed %u, graded frame not found %u", ran, failed, missed);
     ran = failed = missed = 0;
