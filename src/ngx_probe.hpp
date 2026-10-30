@@ -288,14 +288,8 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   if (!copy_instead) diag::SpanStart(diag::dlss_sr, cmd_list, Log);
   NVSDK_NGX_Result eval_result = NVSDK_NGX_Result_Success;
   if (copy_instead) {
-  } else if (sr_mode == 2) {
-    ID3D12Resource *color = nullptr, *output = nullptr;
-    float jx = 0.0f, jy = 0.0f;
-    params->Get(NVSDK_NGX_Parameter_Color, &color);
-    params->Get(NVSDK_NGX_Parameter_Output, &output);
-    params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &jx);
-    params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &jy);
-    if (color == nullptr || output == nullptr || !sr_fovea::StretchRecord(cmd_list, color, output, jx, jy))
+  } else if (sr_mode == 2 || sr_mode == 3) {
+    if (!sr_fovea::StretchRecord(cmd_list, params, sr_mode == 3))
       eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
   } else {
     eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);

@@ -408,6 +408,7 @@ void PollLiveSettings() {
   sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", 0);
   sr_fovea::margin = LiveInt(path, "SrMargin", 64);
   sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
+  sr_fovea::taa_percent = LiveInt(path, "SrTaa", 10);
   {
     static int last_record = 0;   // RecordNV=<n>: a new value arms the recorder for n NR evaluates
     const int v = LiveInt(path, "RecordNV", last_record);
