@@ -365,6 +365,8 @@ void PollLiveSettings() {
   sr_fovea::preset = LiveInt(path, "SrPreset", 0);
   sr_fovea::mode = LiveInt(path, "SrFovea", 0);
   sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", 0);
+  sr_fovea::shift = LiveInt(path, "SrShift", 1);
+  sr_fovea::shift_sign = LiveInt(path, "SrShiftSign", 1);
   sr_fovea::margin = LiveInt(path, "SrMargin", 64);
   sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
   sr_fovea::taa_percent = LiveInt(path, "SrTaa", 10);
