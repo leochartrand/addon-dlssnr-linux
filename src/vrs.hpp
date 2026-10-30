@@ -18,6 +18,7 @@ namespace vrs {
 
 inline std::atomic<int> test{0};
 inline std::atomic<int> rate{1};
+inline std::atomic<int> call{2};   // bisecting a crash: 0 only QueryInterface, 1 always 1x1, 2 as wanted
 
 inline D3D12_SHADING_RATE Rate() { return rate.load() == 2 ? D3D12_SHADING_RATE_4X4 : D3D12_SHADING_RATE_2X2; }
 
@@ -43,6 +44,11 @@ inline void OnBind(reshade::api::command_list* cmd, uint32_t count, const reshad
   auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
   ID3D12GraphicsCommandList5* l5 = nullptr;
   if (FAILED(native->QueryInterface(IID_PPV_ARGS(&l5))) || l5 == nullptr) return;
+  if (call.load() == 0) {
+    l5->Release();
+    return;
+  }
+  if (call.load() == 1) coarse = false;
   // Explicit combiners: vkd3d-proton reads them without a null check (a null here crashed the game).
   const D3D12_SHADING_RATE_COMBINER keep[2] = {D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
                                                D3D12_SHADING_RATE_COMBINER_PASSTHROUGH};

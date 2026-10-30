@@ -402,6 +402,7 @@ void PollLiveSettings() {
   s.force_reset = LiveInt(path, "ForceReset", s.force_reset ? 1 : 0) != 0;
   vrs::test = LiveInt(path, "VrsTest", 0);
   vrs::rate = LiveInt(path, "VrsRate", 1);
+  vrs::call = LiveInt(path, "VrsCall", 2);
   {
     static int last_record = 0;   // RecordNV=<n>: a new value arms the recorder for n NR evaluates
     const int v = LiveInt(path, "RecordNV", last_record);
