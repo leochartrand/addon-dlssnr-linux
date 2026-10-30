@@ -403,6 +403,11 @@ void PollLiveSettings() {
   vrs::test = LiveInt(path, "VrsTest", 0);
   vrs::rate = LiveInt(path, "VrsRate", 1);
   vrs::call = LiveInt(path, "VrsCall", 2);
+  sr_fovea::preset = LiveInt(path, "SrPreset", 0);
+  sr_fovea::mode = LiveInt(path, "SrFovea", 0);
+  sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", 0);
+  sr_fovea::margin = LiveInt(path, "SrMargin", 64);
+  sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
   {
     static int last_record = 0;   // RecordNV=<n>: a new value arms the recorder for n NR evaluates
     const int v = LiveInt(path, "RecordNV", last_record);
