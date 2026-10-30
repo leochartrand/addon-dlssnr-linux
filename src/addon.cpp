@@ -240,18 +240,18 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "EngineHistory", s.engine_history);
 
   // A hand-edited ini must not push values past what the overlay allows.
-  s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
+  s.transfer = Clamp(s.transfer, 0.0f, 3.0f);
   s.colour_strength = Clamp(s.colour_strength, 0.0f, 1.0f);
   s.max_ratio = Clamp(s.max_ratio, 1.0f, 8.0f);
   s.wp_scale = Clamp(s.wp_scale, 0.1f, 4.0f);
-  s.intensity = Clamp(s.intensity, 0.0f, 2.0f);
-  s.local_structure = Clamp(s.local_structure, 0.0f, 2.0f);
-  s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
+  s.intensity = Clamp(s.intensity, 0.0f, 3.0f);
+  s.local_structure = Clamp(s.local_structure, 0.0f, 4.0f);
+  s.local_tone = Clamp(s.local_tone, 0.0f, 4.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
-  s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 2.0f);
-  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 2.0f);
-  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 2.0f);
+  s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 3.0f);
+  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 4.0f);
+  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 4.0f);
   s.split_global_skin = Clamp(s.split_global_skin, -1.0f, 2.0f);
   if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
   if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
@@ -452,18 +452,18 @@ void PollLiveSettings() {
   sr_fovea::feather = LiveInt(path, "SrFeather", 1);
 
   // The same bounds a hand-edited ReShade.ini gets.
-  s.transfer = Clamp(s.transfer, 0.0f, 1.5f);
+  s.transfer = Clamp(s.transfer, 0.0f, 3.0f);
   s.colour_strength = Clamp(s.colour_strength, 0.0f, 1.0f);
   s.max_ratio = Clamp(s.max_ratio, 1.0f, 8.0f);
   s.wp_scale = Clamp(s.wp_scale, 0.1f, 4.0f);
-  s.intensity = Clamp(s.intensity, 0.0f, 2.0f);
-  s.local_structure = Clamp(s.local_structure, 0.0f, 2.0f);
-  s.local_tone = Clamp(s.local_tone, 0.0f, 2.0f);
+  s.intensity = Clamp(s.intensity, 0.0f, 3.0f);
+  s.local_structure = Clamp(s.local_structure, 0.0f, 4.0f);
+  s.local_tone = Clamp(s.local_tone, 0.0f, 4.0f);
   if (s.preset < 0 || s.preset > 7) s.preset = 0;
   if (s.style < 0 || s.style > 2) s.style = 0;
-  s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 2.0f);
-  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 2.0f);
-  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 2.0f);
+  s.split_global_intensity = Clamp(s.split_global_intensity, 0.0f, 3.0f);
+  s.split_global_structure = Clamp(s.split_global_structure, 0.0f, 4.0f);
+  s.split_global_tone = Clamp(s.split_global_tone, 0.0f, 4.0f);
   if (s.split_global_style < 0 || s.split_global_style > 2) s.split_global_style = 0;
   if (s.split_global_preset < -1 || s.split_global_preset > 7) s.split_global_preset = 1;
   if (f.fovea_debug < 0 || f.fovea_debug > 3) f.fovea_debug = 0;
@@ -625,7 +625,7 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     if (ImGui::RadioButton("DLSS's input (HDR, render resolution; colour bridge)", &where, 2)) changed = true;
     s.graded = where == 0;
     s.before_upscale = where == 2;
-    changed |= SliderWithReset("Model's share of the picture", &s.transfer, 0.0f, 1.5f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Model's share of the picture", &s.transfer, 0.0f, 3.0f, "%.2f", 1.0f);
     if (!s.graded) {
       ImGui::SeparatorText("Colour bridge (HDR frames only)");
       changed |= SliderWithReset("Colour strength", &s.colour_strength, 0.0f, 1.0f, "%.2f", 0.0f);
@@ -644,10 +644,25 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     // testing via OptiScaler_DLSSNR). With two calls, each region has its own set, side by side. Our engine
     // reads these live; NGX only at a rebuild (Apply).
     const bool periphery = two_calls && f.periphery_pass;
+    // Past 1 the controls leave what the model was trained on: intensity extrapolates the answer away from the
+    // frame, tone and structure push its conditioning. For screenshots and photo mode, not play.
+    auto strengths = [&](float intensity, float tone, float structure, float share) {
+      s.intensity = s.split_global_intensity = intensity;
+      s.local_tone = s.split_global_tone = tone;
+      s.local_structure = s.split_global_structure = structure;
+      s.transfer = share;
+      nr_runner::ApplyModelSettings();
+      changed = true;
+    };
+    if (ImGui::Button("Deep fried")) strengths(1.5f, 2.5f, 2.5f, 1.5f);
+    ImGui::SameLine();
+    if (ImGui::Button("Normal")) strengths(1.0f, 1.0f, 1.0f, 1.0f);
+    ImGui::SameLine();
+    ImGui::TextDisabled("both regions; past 1 is outside what the model was trained on");
     if (periphery) ImGui::SeparatorText("The crop");
-    changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 2.0f, "%.2f", 1.0f);
-    changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 2.0f, "%.2f", 1.0f);
-    changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 2.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("NR intensity", &s.intensity, 0.0f, 3.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Structure intensity", &s.local_structure, 0.0f, 4.0f, "%.2f", 1.0f);
+    changed |= SliderWithReset("Global intensity", &s.local_tone, 0.0f, 4.0f, "%.2f", 1.0f);
     changed |= SliderWithReset("Skin detail (-1 = structure)", &s.skin_structure, -1.0f, 2.0f, "%.2f", -1.0f);
     if (s.style > 2) s.style = 2;
     changed |= ImGui::Combo("Style", &s.style, "Default (standard)\0Natural\0Cinematic\0");
@@ -655,9 +670,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     if (periphery) {
       ImGui::SeparatorText("The periphery");
       bool model = false;
-      model |= SliderWithReset("NR intensity##periphery", &s.split_global_intensity, 0.0f, 2.0f, "%.2f", 1.0f);
-      model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 2.0f, "%.2f", 1.0f);
-      model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 2.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("NR intensity##periphery", &s.split_global_intensity, 0.0f, 3.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Structure intensity##periphery", &s.split_global_structure, 0.0f, 4.0f, "%.2f", 1.0f);
+      model |= SliderWithReset("Global intensity##periphery", &s.split_global_tone, 0.0f, 4.0f, "%.2f", 1.0f);
       model |= SliderWithReset("Skin detail (-1 = structure)##periphery", &s.split_global_skin, -1.0f, 2.0f, "%.2f", -1.0f);
       model |= ImGui::Combo("Style##periphery", &s.split_global_style, "Default (standard)\0Natural\0Cinematic\0");
       model |= ImGui::SliderInt("Preset (NGX only)##periphery", &s.split_global_preset, -1, 7,
