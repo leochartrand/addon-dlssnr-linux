@@ -43,7 +43,10 @@ inline void OnBind(reshade::api::command_list* cmd, uint32_t count, const reshad
   auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(cmd->get_native());
   ID3D12GraphicsCommandList5* l5 = nullptr;
   if (FAILED(native->QueryInterface(IID_PPV_ARGS(&l5))) || l5 == nullptr) return;
-  l5->RSSetShadingRate(coarse ? Rate() : D3D12_SHADING_RATE_1X1, nullptr);
+  // Explicit combiners: vkd3d-proton reads them without a null check (a null here crashed the game).
+  const D3D12_SHADING_RATE_COMBINER keep[2] = {D3D12_SHADING_RATE_COMBINER_PASSTHROUGH,
+                                               D3D12_SHADING_RATE_COMBINER_PASSTHROUGH};
+  l5->RSSetShadingRate(coarse ? Rate() : D3D12_SHADING_RATE_1X1, keep);
   l5->Release();
 }
 
