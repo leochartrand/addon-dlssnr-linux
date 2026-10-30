@@ -485,10 +485,7 @@ void PollLiveSettings() {
   sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", sr_fovea::crop_preset.load());
   sr_fovea::shift = LiveInt(path, "SrShift", sr_fovea::shift.load());
   sr_fovea::fade_in = LiveInt(path, "SrFadeIn", sr_fovea::fade_in.load());
-  sr_fovea::shift_sign = LiveInt(path, "SrShiftSign", 1);
   sr_fovea::margin = LiveInt(path, "SrMargin", 64);
-  sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
-  sr_fovea::taa_percent = LiveInt(path, "SrTaa", 10);
   sr_fovea::feather = LiveInt(path, "SrFeather", 1);
   {
     static int last_record = 0;   // RecordNV=<n>: a new value arms the recorder for n NR evaluates
@@ -853,7 +850,6 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     };
     pick("The game's preset (restart the game to apply)", sr_fovea::preset);
     int mode = sr_fovea::mode.load();
-    if (mode > 1) ImGui::TextDisabled("Test mode SrFovea=%d (the periphery without the game's upscale) is on.", mode);
     bool crop = mode != 0;
     if (ImGui::Checkbox("DLSS-SR of its own on the gaze crop (F6)", &crop)) {
       sr_fovea::mode = crop ? 1 : 0;

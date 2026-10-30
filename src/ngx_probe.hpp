@@ -284,17 +284,11 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   ID3D12Resource* const swapped = nr_runner::BeforeDlss(cmd_list, params);
   // DLAA off: the frame is copied to the Output instead of DLSS-SR's 1:1 pass, and the pass runs on it.
   const bool copy_instead = swapped == nullptr && nr_runner::CopyInsteadOfDlaa(cmd_list, params);
-  // Foveated SR (sr_fovea.hpp): the game's upscale, or a bilinear stretch instead of it, then DLSS-SR on the crop.
+  // Foveated SR (sr_fovea.hpp): the game's upscale, then DLSS-SR of our own on the crop.
   const int sr_mode = swapped == nullptr && !copy_instead ? sr_fovea::mode.load() : 0;
   if (!copy_instead) diag::SpanStart(diag::dlss_sr, cmd_list, Log);
   NVSDK_NGX_Result eval_result = NVSDK_NGX_Result_Success;
-  if (copy_instead) {
-  } else if (sr_mode == 2 || sr_mode == 3) {
-    if (!sr_fovea::StretchRecord(cmd_list, params, sr_mode == 3))
-      eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
-  } else {
-    eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
-  }
+  if (!copy_instead) eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
   if (sr_mode != 0 && eval_result == NVSDK_NGX_Result_Success)
     sr_fovea::CropEvaluate(cmd_list, params, real_D3D12_CreateFeature, real_D3D12_EvaluateFeature,
                            real_D3D12_ReleaseFeature, Logf);
