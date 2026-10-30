@@ -157,6 +157,71 @@ inline void End(ID3D12GraphicsCommandList* cmd) {
   t.open = false;
 }
 
+// --- one GPU span (the game's DLSS-SR evaluate) ---------------------------
+
+// Two timestamps around a call recorded into the game's list, read back kRing frames later and logged as an
+// average every kReportEvery frames ("timing: <name> x ms").
+struct Span {
+  const char* name;
+  ID3D12QueryHeap* heap = nullptr;
+  ID3D12Resource* readback = nullptr;
+  bool armed[kRing] = {};
+  uint32_t frame = 0, slot = 0, count = 0;
+  double sum = 0.0;
+};
+
+inline void SpanStart(Span& sp, ID3D12GraphicsCommandList* cmd, LogFn log) {
+  if (sp.heap == nullptr) {
+    ID3D12Device* device = nullptr;
+    if (FAILED(cmd->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr) return;
+    D3D12_QUERY_HEAP_DESC qd = {};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = kRing * 2;
+    const bool ok = SUCCEEDED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&sp.heap))) &&
+                    CreateReadback(device, sizeof(uint64_t) * kRing * 2, &sp.readback);
+    device->Release();
+    if (!ok) {
+      if (sp.heap != nullptr) sp.heap->Release();
+      sp.heap = nullptr;
+      return;
+    }
+  }
+  sp.slot = sp.frame++ % kRing;
+  const uint64_t freq = timestamp_freq.load(std::memory_order_relaxed);
+  if (sp.armed[sp.slot] && freq != 0) {
+    D3D12_RANGE range = {sp.slot * 2 * sizeof(uint64_t), (sp.slot + 1) * 2 * sizeof(uint64_t)};
+    void* p = nullptr;
+    if (SUCCEEDED(sp.readback->Map(0, &range, &p))) {
+      const uint64_t* ts = (const uint64_t*)((const char*)p + range.Begin);
+      if (ts[1] >= ts[0]) {
+        sp.sum += double(ts[1] - ts[0]) * 1000.0 / double(freq);
+        ++sp.count;
+      }
+      D3D12_RANGE none = {0, 0};
+      sp.readback->Unmap(0, &none);
+    }
+    sp.armed[sp.slot] = false;
+  }
+  if (sp.count >= kReportEvery) {
+    char line[128];
+    std::snprintf(line, sizeof(line), "timing: %s %.2f ms/frame (GPU)", sp.name, sp.sum / sp.count);
+    log(line);
+    sp.sum = 0.0;
+    sp.count = 0;
+  }
+  cmd->EndQuery(sp.heap, D3D12_QUERY_TYPE_TIMESTAMP, sp.slot * 2);
+}
+
+inline void SpanStop(Span& sp, ID3D12GraphicsCommandList* cmd) {
+  if (sp.heap == nullptr) return;
+  cmd->EndQuery(sp.heap, D3D12_QUERY_TYPE_TIMESTAMP, sp.slot * 2 + 1);
+  cmd->ResolveQueryData(sp.heap, D3D12_QUERY_TYPE_TIMESTAMP, sp.slot * 2, 2, sp.readback,
+                        sp.slot * 2 * sizeof(uint64_t));
+  sp.armed[sp.slot] = true;
+}
+
+inline Span dlss_sr{"DLSS-SR evaluate"};
+
 // --- frame dump -----------------------------------------------------------
 
 // A dump is a burst of DumpBurst consecutive frames (1-8), written as ids want, want+1, ...

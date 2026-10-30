@@ -280,9 +280,11 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   if (mark != nullptr) mark(cmd_list, "DLSS evaluate");
   ID3D12Resource* const swapped = nr_runner::BeforeDlss(cmd_list, params);
   // DLAA off: the frame is copied to the Output instead of DLSS-SR's 1:1 pass, and the pass runs on it.
-  const auto eval_result = swapped == nullptr && nr_runner::CopyInsteadOfDlaa(cmd_list, params)
-                               ? NVSDK_NGX_Result_Success
-                               : real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
+  const bool copy_instead = swapped == nullptr && nr_runner::CopyInsteadOfDlaa(cmd_list, params);
+  if (!copy_instead) diag::SpanStart(diag::dlss_sr, cmd_list, Log);
+  const auto eval_result = copy_instead ? NVSDK_NGX_Result_Success
+                                        : real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
+  if (!copy_instead) diag::SpanStop(diag::dlss_sr, cmd_list);
   if (swapped != nullptr)
     nr_runner::AfterDlss(cmd_list, params, swapped);
   else if (eval_result == NVSDK_NGX_Result_Success) {
