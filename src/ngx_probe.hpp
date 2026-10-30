@@ -254,6 +254,7 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12CreateFeature(
 }
 
 static decltype(&NVSDK_NGX_D3D12_EvaluateFeature) real_D3D12_EvaluateFeature = nullptr;
+static decltype(&NVSDK_NGX_D3D12_ReleaseFeature) real_D3D12_ReleaseFeature = nullptr;
 inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
     ID3D12GraphicsCommandList* cmd_list, const NVSDK_NGX_Handle* handle,
     const NVSDK_NGX_Parameter* params, PFN_NVSDK_NGX_ProgressCallback callback) {
@@ -295,7 +296,10 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
     eval_result = real_D3D12_EvaluateFeature(cmd_list, handle, params, callback);
   }
   if (sr_mode != 0 && eval_result == NVSDK_NGX_Result_Success)
-    sr_fovea::CropEvaluate(cmd_list, params, real_D3D12_CreateFeature, real_D3D12_EvaluateFeature, Logf);
+    sr_fovea::CropEvaluate(cmd_list, params, real_D3D12_CreateFeature, real_D3D12_EvaluateFeature,
+                           real_D3D12_ReleaseFeature, Logf);
+  else
+    sr_fovea::cr.base_x = -1;   // off this frame: its history starts over when it comes back
   if (!copy_instead) diag::SpanStop(diag::dlss_sr, cmd_list);
   if (swapped != nullptr)
     nr_runner::AfterDlss(cmd_list, params, swapped);
@@ -306,7 +310,6 @@ inline NVSDK_NGX_Result NVSDK_CONV HookD3D12EvaluateFeature(
   return eval_result;
 }
 
-static decltype(&NVSDK_NGX_D3D12_ReleaseFeature) real_D3D12_ReleaseFeature = nullptr;
 inline NVSDK_NGX_Result NVSDK_CONV HookD3D12ReleaseFeature(NVSDK_NGX_Handle* handle) {
   Logf("ngx-probe: D3D12_ReleaseFeature handle=%p", static_cast<void*>(handle));
   return real_D3D12_ReleaseFeature(handle);

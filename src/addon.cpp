@@ -113,6 +113,40 @@ void OnReshadePresent(reshade::api::effect_runtime* runtime) {
   }
 }
 
+// DLSS presets by letter (NVSDK_NGX_DLSS_Hint_Render_Preset: A = 1 ... M = 13; 0 the default).
+const char* PresetName(int v) {
+  static const char* const kNames[] = {"default", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"};
+  return v >= 0 && v <= 13 ? kNames[v] : "?";
+}
+int NextCropPreset(int v) { return v == 0 ? 5 : v == 5 ? 11 : v == 11 ? 13 : 0; }
+
+void SaveSettings();
+
+char toast[128] = {};
+LARGE_INTEGER toast_at = {};
+void Toast() {
+  std::snprintf(toast, sizeof(toast), "SR crop: %s (%s)   NR crop: %s",
+                sr_fovea::mode.load() != 0 ? "on" : "off", PresetName(sr_fovea::crop_preset.load()),
+                fov::settings.crop_pass ? "on" : "off");
+  QueryPerformanceCounter(&toast_at);
+}
+// The note in the corner, drawn every frame for two seconds after a key (the overlay itself may be closed).
+void OnReshadeOverlay(reshade::api::effect_runtime*) {
+  if (toast[0] == 0) return;
+  LARGE_INTEGER now, freq;
+  QueryPerformanceCounter(&now);
+  QueryPerformanceFrequency(&freq);
+  if ((double)(now.QuadPart - toast_at.QuadPart) / (double)freq.QuadPart > 2.0) return;
+  ImGui::SetNextWindowPos(ImVec2(40.0f, 40.0f));
+  ImGui::SetNextWindowBgAlpha(0.6f);
+  ImGui::Begin("##dlssnr-toast", nullptr,
+               ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoSavedSettings);
+  ImGui::SetWindowFontScale(2.0f);
+  ImGui::TextUnformatted(toast);
+  ImGui::End();
+}
+
 void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swapchain,
                const reshade::api::rect*, const reshade::api::rect*,
                uint32_t, const reshade::api::rect*) {
@@ -123,6 +157,21 @@ void OnPresent(reshade::api::command_queue* queue, reshade::api::swapchain* swap
   const bool f10_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
   if (f10_down && !f10_was_down) nr_runner::SetEnabled(!nr_runner::IsEnabled());
   f10_was_down = f10_down;
+  // The crop A/B keys (F9 is the game's quickload, F5 its quicksave): F6 the crop's DLSS-SR on/off, F7 its
+  // preset (default, E, K, M), F8 the NR crop pass on/off. Each shows a note on screen for two seconds.
+  static bool was[3] = {};
+  const int keys[3] = {VK_F6, VK_F7, VK_F8};
+  for (int i = 0; i < 3; ++i) {
+    const bool down = (GetAsyncKeyState(keys[i]) & 0x8000) != 0;
+    if (down && !was[i]) {
+      if (i == 0) sr_fovea::mode = sr_fovea::mode.load() == 0 ? 1 : 0;
+      if (i == 1) sr_fovea::crop_preset = NextCropPreset(sr_fovea::crop_preset.load());
+      if (i == 2) fov::settings.crop_pass = !fov::settings.crop_pass;
+      Toast();
+      SaveSettings();
+    }
+    was[i] = down;
+  }
 
   // The pass's GPU timers need the queue's timestamp rate; any D3D12 queue on the device has it.
   if (diag::timestamp_freq.load(std::memory_order_relaxed) == 0 && queue != nullptr &&
@@ -195,6 +244,20 @@ void LoadSettings() {
   reshade::get_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::get_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
+  reshade::get_config_value(nullptr, kConfigSection, "CropPass", f.crop_pass);
+  {
+    int v[5] = {sr_fovea::preset, sr_fovea::mode, sr_fovea::crop_preset, sr_fovea::shift, sr_fovea::fade_in};
+    reshade::get_config_value(nullptr, kConfigSection, "SrPreset", v[0]);
+    reshade::get_config_value(nullptr, kConfigSection, "SrFovea", v[1]);
+    reshade::get_config_value(nullptr, kConfigSection, "SrCropPreset", v[2]);
+    reshade::get_config_value(nullptr, kConfigSection, "SrShift", v[3]);
+    reshade::get_config_value(nullptr, kConfigSection, "SrFadeIn", v[4]);
+    sr_fovea::preset = v[0];
+    sr_fovea::mode = v[1];
+    sr_fovea::crop_preset = v[2];
+    sr_fovea::shift = v[3];
+    sr_fovea::fade_in = v[4];
+  }
   reshade::get_config_value(nullptr, kConfigSection, "NREngine", s.engine);
   {
     size_t n = sizeof(s.engine_crop);
@@ -286,6 +349,12 @@ void SaveSettings() {
   reshade::set_config_value(nullptr, kConfigSection, "FoveaDebugView", f.fovea_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryDebugView", f.periphery_debug);
   reshade::set_config_value(nullptr, kConfigSection, "PeripheryPass", f.periphery_pass);
+  reshade::set_config_value(nullptr, kConfigSection, "CropPass", f.crop_pass);
+  reshade::set_config_value(nullptr, kConfigSection, "SrPreset", sr_fovea::preset.load());
+  reshade::set_config_value(nullptr, kConfigSection, "SrFovea", sr_fovea::mode.load());
+  reshade::set_config_value(nullptr, kConfigSection, "SrCropPreset", sr_fovea::crop_preset.load());
+  reshade::set_config_value(nullptr, kConfigSection, "SrShift", sr_fovea::shift.load());
+  reshade::set_config_value(nullptr, kConfigSection, "SrFadeIn", sr_fovea::fade_in.load());
   reshade::set_config_value(nullptr, kConfigSection, "NREngine", s.engine);
   reshade::set_config_value(nullptr, kConfigSection, "EngineCrop", static_cast<const char*>(s.engine_crop));
   reshade::set_config_value(nullptr, kConfigSection, "EngineLow", static_cast<const char*>(s.engine_low));
@@ -388,6 +457,7 @@ void PollLiveSettings() {
   f.fovea_debug = LiveInt(path, "FoveaDebugView", f.fovea_debug);
   f.periphery_debug = LiveInt(path, "PeripheryDebugView", f.periphery_debug);
   f.periphery_pass = LiveInt(path, "PeripheryPass", f.periphery_pass ? 1 : 0) != 0;
+  f.crop_pass = LiveInt(path, "CropPass", f.crop_pass ? 1 : 0) != 0;
   s.engine = LiveInt(path, "NREngine", s.engine ? 1 : 0) != 0;
   LiveString(path, "EngineCrop", s.engine_crop, sizeof(s.engine_crop));
   LiveString(path, "EngineLow", s.engine_low, sizeof(s.engine_low));
@@ -403,11 +473,11 @@ void PollLiveSettings() {
   vrs::test = LiveInt(path, "VrsTest", 0);
   vrs::rate = LiveInt(path, "VrsRate", 1);
   vrs::call = LiveInt(path, "VrsCall", 2);
-  sr_fovea::preset = LiveInt(path, "SrPreset", 0);
-  sr_fovea::mode = LiveInt(path, "SrFovea", 0);
-  sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", 0);
-  sr_fovea::shift = LiveInt(path, "SrShift", 1);
-  sr_fovea::fade_in = LiveInt(path, "SrFadeIn", 4);
+  sr_fovea::preset = LiveInt(path, "SrPreset", sr_fovea::preset.load());
+  sr_fovea::mode = LiveInt(path, "SrFovea", sr_fovea::mode.load());
+  sr_fovea::crop_preset = LiveInt(path, "SrCropPreset", sr_fovea::crop_preset.load());
+  sr_fovea::shift = LiveInt(path, "SrShift", sr_fovea::shift.load());
+  sr_fovea::fade_in = LiveInt(path, "SrFadeIn", sr_fovea::fade_in.load());
   sr_fovea::shift_sign = LiveInt(path, "SrShiftSign", 1);
   sr_fovea::margin = LiveInt(path, "SrMargin", 64);
   sr_fovea::jitter_sign = LiveInt(path, "SrJitterSign", -1);
@@ -711,6 +781,9 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
       changed |= ImGui::SliderInt("Crop snap", &f.crop_snap, 0, 256, f.crop_snap <= 1 ? "follows the gaze exactly" : "%d px");
       changed |= SliderWithReset("Edge blend", &f.falloff, 0.0f, 0.5f, "%.2f of the height", 0.10f);
 
+      if (two_calls)
+        changed |= ImGui::Checkbox("Run the crop pass (F8; off: its answer is its input, the periphery's tone kept)",
+                                   &f.crop_pass);
       ImGui::SeparatorText("The periphery (the whole frame, low resolution)");
       if (two_calls) {
         changed |= ImGui::Checkbox("Run the periphery pass (off: the game's own frame outside the crop)",
@@ -752,6 +825,42 @@ void OnDrawOverlay(reshade::api::effect_runtime*) {
     }
   }
 
+  if (ImGui::CollapsingHeader("Super resolution (DLSS-SR)", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // The game's preset is read when it creates DLSS-SR; the crop's own is rebuilt here on a change.
+    static const int kPresets[] = {0, 5, 10, 11, 12, 13};
+    static const char kPresetNames[] = "Default\0E (CNN)\0J (transformer)\0K (transformer)\0L (transformer 2)\0M (transformer 2)\0";
+    auto pick = [&](const char* label, std::atomic<int>& v) {
+      int i = 0;
+      for (int k = 0; k < 6; ++k)
+        if (kPresets[k] == v.load()) i = k;
+      if (ImGui::Combo(label, &i, kPresetNames)) {
+        v = kPresets[i];
+        changed = true;
+      }
+    };
+    pick("The game's preset (restart the game to apply)", sr_fovea::preset);
+    int mode = sr_fovea::mode.load();
+    if (mode > 1) ImGui::TextDisabled("Test mode SrFovea=%d (the periphery without the game's upscale) is on.", mode);
+    bool crop = mode != 0;
+    if (ImGui::Checkbox("DLSS-SR of its own on the gaze crop (F6)", &crop)) {
+      sr_fovea::mode = crop ? 1 : 0;
+      changed = true;
+    }
+    if (crop) {
+      pick("The crop's preset (F7 cycles default, E, K, M)", sr_fovea::crop_preset);
+      bool shift = sr_fovea::shift.load() != 0;
+      if (ImGui::Checkbox("Carry its history over when it moves", &shift)) {
+        sr_fovea::shift = shift ? 1 : 0;
+        changed = true;
+      }
+      int fade = sr_fovea::fade_in.load();
+      if (ImGui::SliderInt("Fade-in of pixels new to it", &fade, 0, 16, fade == 0 ? "off" : "%d frames")) {
+        sr_fovea::fade_in = fade;
+        changed = true;
+      }
+    }
+  }
+
   if (ImGui::CollapsingHeader("Debug views")) {
     ImGui::Combo("Final picture", &s.debug_view,
                  "Off\0What the model sees\0Model answer\0Difference x20\0Fovea map (where the crop is)\0");
@@ -787,6 +896,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
     nr_runner::poll_live = PollLiveSettings;
     reshade::register_event<reshade::addon_event::present>(OnPresent);
     reshade::register_event<reshade::addon_event::reshade_present>(OnReshadePresent);
+    reshade::register_event<reshade::addon_event::reshade_overlay>(OnReshadeOverlay);
       ui_probe::Register();
       vrs::Register();
       graded_hook::Register();
@@ -822,6 +932,7 @@ BOOL APIENTRY DllMain(HMODULE h_module, DWORD fdw_reason, LPVOID lp_reserved) {
       reshade::unregister_overlay(nullptr, OnDrawOverlay);
       reshade::unregister_event<reshade::addon_event::present>(OnPresent);
       reshade::unregister_event<reshade::addon_event::reshade_present>(OnReshadePresent);
+      reshade::unregister_event<reshade::addon_event::reshade_overlay>(OnReshadeOverlay);
       reshade::unregister_event<reshade::addon_event::init_swapchain>(OnInitSwapchain);
       reshade::unregister_addon(h_module);
       break;

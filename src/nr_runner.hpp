@@ -878,7 +878,7 @@ inline bool Evaluate(ID3D12GraphicsCommandList* cmd, const Guides& guides, ID3D1
     if (use_engine) {
       // NVIDIA's controls, per region as NGX gets them (WriteTuning).
       nr_engine::Controls ctl;
-      ctl.intensity = low ? s.split_global_intensity : s.intensity;
+      ctl.intensity = low ? s.split_global_intensity : (fov::settings.crop_pass ? s.intensity : 0.0f);
       ctl.style = low ? s.split_global_style : s.style;
       ctl.tone = low ? s.split_global_tone : s.local_tone;
       ctl.structure = low ? s.split_global_structure : s.local_structure;

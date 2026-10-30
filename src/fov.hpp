@@ -74,6 +74,7 @@ struct Settings {
   // game's own frame (with whatever lighting shaders run before the feed), inside it the crop's answer
   // with its own coarse part.
   bool periphery_pass = true;
+  bool crop_pass = true;   // off: the crop's answer is its input (the model still runs, at intensity 0)
   // Split with two calls: the engine programs' fields (nr_engine), which the regions snap to for both
   // backends unless free_sizes (0 = no programs, or free sizes: the regions follow the settings above).
   // Set by the runner each frame.
